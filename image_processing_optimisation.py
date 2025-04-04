@@ -12,9 +12,9 @@ ella beck
 import random
 import cv2
 import numpy as np
-import matplotlib.pyplot as plt
+#import matplotlib.pyplot as plt
 import requests
-from skimage.metrics import structural_similarity as ssim
+#from skimage.metrics import structural_similarity as ssim
 from numba import njit, prange
 
 
@@ -82,8 +82,8 @@ def get_video_frames_from_url(url, local_filename='temp_video.avi'):
     return load_video_frames(local_filename)
 
 
-def detect_damaged_pixels(frames, plot=True, consecutive_threshold=5, ssim_threshold = 0.1,
-                          brightness_threshold = 170, min_cluster_size = 1, max_cluster_size = 100):
+def detect_damaged_pixels(frames, plot=False, consecutive_threshold=5, ssim_threshold = 0.1,
+                          brightness_threshold = 170, flow_threshold = 2.0):
     """
     main code for detecting damaged pixels
     requires video frames as greyscale arrays of brightness values
@@ -101,13 +101,16 @@ def detect_damaged_pixels(frames, plot=True, consecutive_threshold=5, ssim_thres
     damaged_pixel_masks = []
     damaged_pixel_counts = []
 
+    min_cluster_size = 1
+    max_cluster_size = 100
+
     for i in range(num_frames):
         current_frame = frames[i]
 
         # detect global scene changes
         if i > 0:
-            ssim_score = compute_ssim(frames[i], frames[i - 1])
-
+            #ssim_score = compute_ssim(frames[i], frames[i - 1])
+            ssim_score = 0.9
             if ssim_score < ssim_threshold:
                 print(f'Frame {i} skipped due to global scene change')
 
@@ -144,38 +147,46 @@ def detect_damaged_pixels(frames, plot=True, consecutive_threshold=5, ssim_thres
 
     # find estimated number of damaged pixels in bright areas
     bright_area_estimates = find_bright_area_estimates(frames, damaged_pixel_masks,
-        np.array(filtered_damaged_pixel_counts), brightness_threshold)
+        brightness_threshold)
 
 
     total_damaged_pixel_counts = [actual + estimate if not np.isnan(estimate) else actual
         for actual, estimate in zip(filtered_damaged_pixel_counts, bright_area_estimates)]
 
-    # create plots
-    if plot:
-        visualize_damaged_pixels(frames[0], damaged_pixel_masks[0],
-            filtered_damaged_pixel_counts[0], estimate_count = bright_area_estimates[0])
-        visualize_damaged_pixels(frames[1], damaged_pixel_masks[1],
-            filtered_damaged_pixel_counts[1], estimate_count = bright_area_estimates[1])
-        visualize_damaged_pixels(frames[2], damaged_pixel_masks[2],
-            filtered_damaged_pixel_counts[2], estimate_count = bright_area_estimates[2])
 
-        #calculate heatmap of damaged pixels
-        # heatmap = find_damaged_pixel_heatmap(height, width, frames,
-        # damaged_pixel_masks, threshold)#check this threshold
-        # plot_heatmap(heatmap, title = "Damaged Pixel Heatmap")
+    #compute optical flow metrics on the original frames
+    optical_flows = compute_optical_flow_metric(frames)
 
-        plot_damaged_pixels(total_damaged_pixel_counts)
+    frames, total_damaged_pixel_counts, damaged_pixel_masks, optical_flows = \
+        filter_frames_by_optical_flow(frames, total_damaged_pixel_counts, optical_flows, damaged_pixel_masks, flow_threshold)
+    
+
+    # # create plots
+    # if plot:
+    #     visualize_damaged_pixels(frames[0], damaged_pixel_masks[0],
+    #         filtered_damaged_pixel_counts[0], estimate_count = bright_area_estimates[0])
+    #     visualize_damaged_pixels(frames[1], damaged_pixel_masks[1],
+    #         filtered_damaged_pixel_counts[1], estimate_count = bright_area_estimates[1])
+    #     visualize_damaged_pixels(frames[2], damaged_pixel_masks[2],
+    #         filtered_damaged_pixel_counts[2], estimate_count = bright_area_estimates[2])
+
+    #     #calculate heatmap of damaged pixels
+    #     # heatmap = find_damaged_pixel_heatmap(height, width, frames,
+    #     # damaged_pixel_masks, threshold)#check this threshold
+    #     # plot_heatmap(heatmap, title = "Damaged Pixel Heatmap")
+
+    #     plot_damaged_pixels(total_damaged_pixel_counts)
 
     return total_damaged_pixel_counts
 
 
-def compute_ssim(frame1, frame2):
-    """
-    computes the similarity score between consecutive frames
-    """
-    score, _ = ssim(frame1, frame2, full = True, data_range = 255)
+# def compute_ssim(frame1, frame2):
+#     """
+#     computes the similarity score between consecutive frames
+#     """
+#     score, _ = ssim(frame1, frame2, full = True, data_range = 255)
 
-    return score
+#     return score
 
 
 def find_background(frames):
@@ -212,6 +223,7 @@ def get_damaged_pixel_mask(frame, height, width, background):
     """
 
     damaged_pixels = np.zeros_like(frame, dtype=np.bool_)
+    thresholds = np.empty((height, width), dtype = np.float64)
 
     for row in prange(height):
         for col in prange(width):
@@ -219,6 +231,7 @@ def get_damaged_pixel_mask(frame, height, width, background):
             # condition 1: pixel brightness should exceed background by a threshold
             #   scaled with background brightness
             threshold = max(30, 30 + (background[row, col] / 255) * (255 - 30))
+            thresholds[row, col] = threshold
 
             if frame[row, col] > threshold:
                 # condition 2: pixel's brightness should exceed mean of its
@@ -232,7 +245,7 @@ def get_damaged_pixel_mask(frame, height, width, background):
 
     damaged_pixels_uint8 = damaged_pixels.astype(np.uint8)
 
-    return damaged_pixels_uint8, threshold
+    return damaged_pixels_uint8, thresholds
 
 
 def filter_damaged_pixel_clusters(damaged_pixel_mask, min_cluster_size, max_cluster_size):
@@ -359,7 +372,7 @@ def estimate_damaged_pixels_in_bright_areas(frames, damaged_pixel_masks, brightn
 
 
 @njit(parallel = True)
-def find_bright_area_estimates(frames, damaged_pixel_masks, damaged_pixel_counts,
+def find_bright_area_estimates(frames, damaged_pixel_masks,
     brightness_threshold):
     """
     finds estimated number of damaged pixels in bright areas using 
@@ -383,6 +396,54 @@ def find_bright_area_estimates(frames, damaged_pixel_masks, damaged_pixel_counts
             bright_area_estimates[i] = np.nan
 
     return bright_area_estimates
+
+
+def compute_optical_flow_metric(frames):
+    """
+    computes the average optical flow magnitude between consecutive frames using the farneback method.
+    assumes frames are grayscale images.
+    returns an array of optical flow magnitudes for each frame (first frame is assigned 0).
+    """
+    optical_flows = [0.0]
+
+    for i in range(1, len(frames)):
+        prev_frame = frames[i - 1].astype(np.float32)
+        current_frame = frames[i].astype(np.float32)
+        flow = cv2.calcOpticalFlowFarneback(prev_frame, current_frame, None, pyr_scale=0.5,
+                                            levels=3, winsize=15, iterations=3, poly_n=5,
+                                            poly_sigma=2, flags=0)
+        mag, _ = cv2.cartToPolar(flow[..., 0], flow[..., 1])
+        optical_flows.append(np.mean(mag))
+
+    return np.array(optical_flows)
+
+
+def filter_frames_by_optical_flow(frames, pixel_counts, optical_flows, damaged_pixel_masks, threshold):
+    """
+    filters out frames whose optical flow exceeds the given threshold.
+    frames with optical flow above the threshold are removed entirely from the frames list,
+    and their corresponding pixel counts and masks are discarded.
+    """
+    
+    removed_counter = 0
+    filtered_frames = []
+    filtered_counts = []
+    filtered_masks = []
+    filtered_flows = []
+    
+    for frame, count, flow, mask in zip(frames, pixel_counts, optical_flows, damaged_pixel_masks):
+        if flow > threshold:
+            removed_counter += 1
+    
+        else:
+            filtered_frames.append(frame)
+            filtered_counts.append(count)
+            filtered_masks.append(mask)
+            filtered_flows.append(flow)
+            
+    print(f"Removed {removed_counter} frames due to high optical flow")
+
+    return filtered_frames, filtered_counts, filtered_masks, filtered_flows
 
 
 @njit(parallel = True)
@@ -413,81 +474,81 @@ def find_damaged_pixel_heatmap(height, width, frames, damaged_pixel_masks, brigh
     return result
 
 
-def visualize_damaged_pixels(frame, damaged_pixels, frame_index, bright_threshold = 170):
-    """
-    plots two versions of a given frame side by side, the second frame
-        highlighting detected damaged pixels
+# def visualize_damaged_pixels(frame, damaged_pixels, frame_index, bright_threshold = 170):
+#     """
+#     plots two versions of a given frame side by side, the second frame
+#         highlighting detected damaged pixels
 
-    plots detected damaged pixels in red
-    plots bright areas (where the code has estimated the damaged pixel count) in green
-    """
+#     plots detected damaged pixels in red
+#     plots bright areas (where the code has estimated the damaged pixel count) in green
+#     """
 
-    height, width = frame.shape
+#     height, width = frame.shape
 
-    bright_areas = frame > bright_threshold
-    highlighted_frame = cv2.cvtColor(frame, cv2.COLOR_GRAY2BGR)
+#     bright_areas = frame > bright_threshold
+#     highlighted_frame = cv2.cvtColor(frame, cv2.COLOR_GRAY2BGR)
 
-    # highlighted damaged pixels in red
-    damaged_pixels_colored = np.zeros((height, width, 3), dtype=np.uint8)
-    damaged_pixels_colored[damaged_pixels] = [255, 0, 0]
-    highlighted_frame = cv2.addWeighted(cv2.cvtColor(frame, cv2.COLOR_GRAY2BGR),
-        1.0, damaged_pixels_colored, 1.0, 0)
+#     # highlighted damaged pixels in red
+#     damaged_pixels_colored = np.zeros((height, width, 3), dtype=np.uint8)
+#     damaged_pixels_colored[damaged_pixels] = [255, 0, 0]
+#     highlighted_frame = cv2.addWeighted(cv2.cvtColor(frame, cv2.COLOR_GRAY2BGR),
+#         1.0, damaged_pixels_colored, 1.0, 0)
 
-    # highlighted bright pixel mask in green
-    bright_pixels_coloured = np.zeros((height, width, 3), dtype = np.uint8)
-    bright_pixels_coloured[bright_areas] = [0, 255, 0]
-    highlighted_frame = cv2.addWeighted(highlighted_frame, 1.0, bright_pixels_coloured, 1.0, 0)
+#     # highlighted bright pixel mask in green
+#     bright_pixels_coloured = np.zeros((height, width, 3), dtype = np.uint8)
+#     bright_pixels_coloured[bright_areas] = [0, 255, 0]
+#     highlighted_frame = cv2.addWeighted(highlighted_frame, 1.0, bright_pixels_coloured, 1.0, 0)
 
-    # #scatter red pixels for estimated damaged pixels
-    # if estimate_count and bright_areas.any():
-    #     bright_coords = np.column_stack(np.where(bright_areas))
-    #     if len(bright_coords) > estimate_count:
-    #         selected_coords = bright_coords[np.random.choice(len(bright_coords),
-    #           round(estimate_count), replace = False)]
+#     # #scatter red pixels for estimated damaged pixels
+#     # if estimate_count and bright_areas.any():
+#     #     bright_coords = np.column_stack(np.where(bright_areas))
+#     #     if len(bright_coords) > estimate_count:
+#     #         selected_coords = bright_coords[np.random.choice(len(bright_coords),
+#     #           round(estimate_count), replace = False)]
 
-    #     else:
-    #         selected_coords = bright_coords
+#     #     else:
+#     #         selected_coords = bright_coords
 
-    #     for coord in selected_coords:
-    #         highlighted_frame[coord[0], coord[1]] = [0, 0, 255]
+#     #     for coord in selected_coords:
+#     #         highlighted_frame[coord[0], coord[1]] = [0, 0, 255]
 
-    plt.figure(figsize = (15, 10))
-    plt.subplot(1, 2, 1)
-    plt.imshow(frame, cmap = 'gray')
-    plt.title(f'Original Frame {frame_index}')
-    plt.axis('off')
+#     plt.figure(figsize = (15, 10))
+#     plt.subplot(1, 2, 1)
+#     plt.imshow(frame, cmap = 'gray')
+#     plt.title(f'Original Frame {frame_index}')
+#     plt.axis('off')
 
-    plt.subplot(1, 2, 2)
-    plt.imshow(cv2.cvtColor(highlighted_frame, cv2.COLOR_BGR2RGB))
-    plt.title(f'Damaged Pixels Highlighted {frame_index}')
-    plt.axis('off')
-    plt.show()
-
-
-def plot_heatmap(heatmap, title = "Damaged Pixel Heatmap"):
-    """
-    plots heatmap showing damaged pixel distribution over every frame
-    """
-
-    plt.figure(figsize = (15, 10))
-    plt.imshow(heatmap, cmap = 'viridis', interpolation ='nearest')
-    plt.colorbar(label = "Percentage of frames (%)")
-    plt.title(title)
-    plt.show()
+#     plt.subplot(1, 2, 2)
+#     plt.imshow(cv2.cvtColor(highlighted_frame, cv2.COLOR_BGR2RGB))
+#     plt.title(f'Damaged Pixels Highlighted {frame_index}')
+#     plt.axis('off')
+#     plt.show()
 
 
-def plot_damaged_pixels(damaged_pixel_counts):
-    """
-    plots the count of damaged pixels across frames
-    """
+# def plot_heatmap(heatmap, title = "Damaged Pixel Heatmap"):
+#     """
+#     plots heatmap showing damaged pixel distribution over every frame
+#     """
 
-    plt.figure(figsize=(10, 5))
-    plt.plot(damaged_pixel_counts, label='Damaged Pixels Count', color='blue')
-    plt.xlabel('Frame Number')
-    plt.ylabel('Number of Damaged Pixels')
-    plt.title('Damaged Pixels Detected Over Time')
-    plt.legend()
-    plt.show()
+#     plt.figure(figsize = (15, 10))
+#     plt.imshow(heatmap, cmap = 'viridis', interpolation ='nearest')
+#     plt.colorbar(label = "Percentage of frames (%)")
+#     plt.title(title)
+#     plt.show()
+
+
+# def plot_damaged_pixels(damaged_pixel_counts):
+#     """
+#     plots the count of damaged pixels across frames
+#     """
+
+#     plt.figure(figsize=(10, 5))
+#     plt.plot(damaged_pixel_counts, label='Damaged Pixels Count', color='blue')
+#     plt.xlabel('Frame Number')
+#     plt.ylabel('Number of Damaged Pixels')
+#     plt.title('Damaged Pixels Detected Over Time')
+#     plt.legend()
+#     plt.show()
 
 
 def create_isotropic_test_video(num_frames=1000, width=928, height=576, damaged_pixel_count=1000):
@@ -578,7 +639,7 @@ def create_clustered_test_video(num_frames = 100, width = 928, height = 576,
 VIDEO_FILENAME ='11_01_H_170726081325.avi'
 NUM_FRAMES = 92000
 monolith_frames_list = np.arange(0, NUM_FRAMES, 1000)
-monolith_frames = np.arange(0, 91000, 1)
+monolith_frames = np.arange(0, 92000, 1)
 FPS = 22
 AVERAGES_TIME = 10
 
@@ -597,6 +658,9 @@ averages = [sum(counts[i : i + (FPS * AVERAGES_TIME)]) / (FPS *
     AVERAGES_TIME) for i in range(0, len(counts), (FPS * AVERAGES_TIME))]
 times = np.linspace(0, len(counts) / FPS, len(averages), endpoint = False)
 
-fig = plt.figure(figsize = (15, 10))
-plt.plot(times, averages)
-plt.show()
+print(averages)
+print(times)
+
+# fig = plt.figure(figsize = (15, 10))
+# plt.plot(times, averages)
+# plt.show()
