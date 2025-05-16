@@ -141,8 +141,7 @@ def detect_damaged_pixels(frames, plot=False, consecutive_threshold=5, brightnes
     # create plots
     if plot:
         for i in range(number_of_plots):
-            visualize_damaged_pixels(frames[i], damaged_pixel_masks[i], filtered_damaged_pixel_counts[i],
-                                     estimate_count = bright_area_estimates[i])
+            visualize_damaged_pixels(frames[i], damaged_pixel_masks[i], filtered_damaged_pixel_counts[i])
 
         #calculate heatmap of damaged pixels
         heatmap = find_damaged_pixel_heatmap(height, width, frames,
