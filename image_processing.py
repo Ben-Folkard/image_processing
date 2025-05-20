@@ -73,7 +73,7 @@ def get_video_frames_from_url(url, local_filename = 'temp_video.avi', frames_sta
     return load_video_frames(local_filename, frames_start, frames_end)
 
 
-def detect_damaged_pixels(frames, plot=False, consecutive_threshold=5, brightness_threshold = 170, flow_threshold = 2.0, number_of_plots = 3):
+def detect_damaged_pixels(frames, plot=False, consecutive_threshold=5, brightness_threshold = 170, flow_threshold = 2.0, number_of_plots = 20):
     """
     main code for detecting damaged pixels
     requires video frames as greyscale arrays of brightness values
@@ -110,7 +110,7 @@ def detect_damaged_pixels(frames, plot=False, consecutive_threshold=5, brightnes
 
         # filter out clusters of damaged pixels
         filtered_damaged_pixels = filter_damaged_pixel_clusters(damaged_pixels_uint8,
-            min_cluster_size, max_cluster_size)
+            min_cluster_size, max_cluster_size, min_circularity = 0.5)
 
         # remove detected damaged pixels which lie in bright regions
         filtered_damaged_pixels = remove_bright_regions(background, threshold,
@@ -119,11 +119,14 @@ def detect_damaged_pixels(frames, plot=False, consecutive_threshold=5, brightnes
         damaged_pixel_masks.append(filtered_damaged_pixels)
 
     # filter pixels which have been marked as damaged for too many consecutive frames
-    filtered_damaged_pixel_counts = filter_consecutive_damaged_pixels(damaged_pixel_masks,
+    filtered_damaged_pixel_counts, persistent_pixels = filter_consecutive_damaged_pixels(damaged_pixel_masks,
         consecutive_threshold)
+    
+    cleaned_masks = [None if m is None else (m & ~persistent_pixels)
+                     for m in damaged_pixel_masks]
 
     # find estimated number of damaged pixels in bright areas
-    bright_area_estimates = find_bright_area_estimates(frames, damaged_pixel_masks,
+    bright_area_estimates = find_bright_area_estimates(frames, cleaned_masks,
         brightness_threshold)
 
 
@@ -134,18 +137,18 @@ def detect_damaged_pixels(frames, plot=False, consecutive_threshold=5, brightnes
     #compute optical flow metrics on the original frames
     optical_flows = compute_optical_flow_metric(frames)
 
-    frames, total_damaged_pixel_counts, damaged_pixel_masks, optical_flows = \
-        filter_frames_by_optical_flow(frames, total_damaged_pixel_counts, optical_flows, damaged_pixel_masks, flow_threshold)
+    frames, total_damaged_pixel_counts, masks_after_flow, optical_flows = \
+        filter_frames_by_optical_flow(frames, total_damaged_pixel_counts, optical_flows, cleaned_masks, flow_threshold)
     
 
     # create plots
     if plot:
         for i in range(number_of_plots):
-            visualize_damaged_pixels(frames[i], damaged_pixel_masks[i], filtered_damaged_pixel_counts[i])
+            visualize_damaged_pixels(frames[i], masks_after_flow[i], total_damaged_pixel_counts[i])
 
         #calculate heatmap of damaged pixels
         heatmap = find_damaged_pixel_heatmap(height, width, frames,
-        damaged_pixel_masks, threshold)#check this threshold
+        masks_after_flow, brightness_threshold)#check this threshold
         plot_heatmap(heatmap, title = "Damaged Pixel Heatmap")
 
         plot_damaged_pixels(total_damaged_pixel_counts)
@@ -213,7 +216,8 @@ def get_damaged_pixel_mask(frame, height, width, background):
     return damaged_pixels_uint8, thresholds
 
 
-def filter_damaged_pixel_clusters(damaged_pixel_mask, min_cluster_size, max_cluster_size):
+def filter_damaged_pixel_clusters(damaged_pixel_mask, min_cluster_size, max_cluster_size,
+                                  min_circularity):
     """
     filters large groups of damaged pixels from the mask
     prevents bright noise such as reflections or glare being misidentified as damaged pixels
@@ -222,14 +226,29 @@ def filter_damaged_pixel_clusters(damaged_pixel_mask, min_cluster_size, max_clus
     filtered_damaged_pixels = np.zeros_like(damaged_pixel_mask, dtype = np.bool_)
 
     # isolate groups of damaged pixels
-    num_labels, labels, stats, _ = cv2.connectedComponentsWithStats(damaged_pixel_mask,
+    num_labels, labels, stats, centroids = cv2.connectedComponentsWithStats(damaged_pixel_mask,
         connectivity = 8)
 
     # filters clusters of damaged pixels if the area is too large
     for label in prange(1, num_labels):
         area = stats[label, cv2.CC_STAT_AREA]
 
-        if min_cluster_size <= area <= max_cluster_size:
+        if area < min_cluster_size or area > max_cluster_size:
+            continue
+
+        #rule out non circular clusters
+        comp_mask = (labels == label).astype(np.uint8)
+
+        contours, _ = cv2.findContours(comp_mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_NONE)
+        if not contours:
+            continue
+
+        perimeter = cv2.arcLength(contours[0], True)
+        if perimeter <= 0:
+            continue
+
+        circularity = 4 * np.pi * (area / (perimeter ** 2))
+        if circularity >= min_circularity:
             filtered_damaged_pixels[labels == label] = True
 
 
@@ -244,25 +263,38 @@ def filter_consecutive_damaged_pixels(damaged_pixel_masks, consecutive_threshold
 
     returns (filtered) damaged pixel count
     """
+    if not damaged_pixel_masks:
+        return []
 
     height, width = damaged_pixel_masks[0].shape
-    filtered_counts = []
+    num_frames = len(damaged_pixel_masks)
 
-    consecutive_counts = np.zeros((height, width), dtype=int)
+    current_run = np.zeros((height, width), dtype = int)
+    longest_run = np.zeros((height, width), dtype = int)
 
     for mask in damaged_pixel_masks:
 
         if mask is None:
-            filtered_counts.append(np.nan)
+            current_run[:] = 0
             continue
 
-        consecutive_counts[mask] += 1
-        consecutive_counts[~mask] = 0
+        current_run[mask] += 1
+        current_run[~mask] = 0
 
-        filtered_mask = mask & (consecutive_counts < consecutive_threshold)
-        filtered_counts.append(np.sum(filtered_mask))
+        longest_run = np.maximum(longest_run, current_run)
 
-    return filtered_counts
+        persistent_pixels = longest_run >= consecutive_threshold
+
+        #second pass
+        filtered_counts = []
+        for mask in damaged_pixel_masks:
+            if mask is None:
+                filtered_counts.append(np.nan)
+            else:
+                valid_mask = mask & (~persistent_pixels)
+                filtered_counts.append(int(np.sum(valid_mask)))
+
+    return filtered_counts, persistent_pixels
 
 
 def remove_bright_regions(background, brightness_threshold,
@@ -597,3 +629,28 @@ def create_clustered_test_video(num_frames = 100, width = 928, height = 576,
         cluster_pixel_count_records.append(total_damaged_pixels)
 
     return frames, cluster_pixel_count_records
+
+
+def create_temporal_test_video(num_frames, width, height, damaged_pixel_count=100, duration = 5,
+                               background_intensity = 0):
+    
+    frames = [np.full((height, width), background_intensity, dtype = np.uint8)
+               for _ in range(num_frames)]
+    
+    #randomly choose damaged pixek coordinates
+    total_pixels = height * width
+    chosen = np.random.choice(total_pixels, size = damaged_pixel_count, replace = False)
+    ys, xs = np.unravel_index(chosen, (height, width))
+    coords = list(zip(ys, xs))
+
+    start_frame = random.randint(0, max(0, num_frames - duration))
+    end_frame = start_frame + duration
+
+    damage_schedule = [0] * num_frames
+
+    for f in range(start_frame, end_frame):
+        for y, x in coords:
+            frames[f][y, x] = 255
+        damage_schedule[f] = damaged_pixel_count
+
+    return frames, damage_schedule
