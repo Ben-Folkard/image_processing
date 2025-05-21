@@ -73,7 +73,7 @@ def get_video_frames_from_url(url, local_filename = 'temp_video.avi', frames_sta
     return load_video_frames(local_filename, frames_start, frames_end)
 
 
-def detect_damaged_pixels(frames, plot=False, consecutive_threshold=5, brightness_threshold = 170, flow_threshold = 2.0, number_of_plots = 20):
+def detect_damaged_pixels(frames, plot=False, consecutive_threshold=5, brightness_threshold = 170, flow_threshold = 2.0, number_of_plots = 20, static_threshold = 50):
     """
     main code for detecting damaged pixels
     requires video frames as greyscale arrays of brightness values
@@ -91,7 +91,7 @@ def detect_damaged_pixels(frames, plot=False, consecutive_threshold=5, brightnes
     damaged_pixel_masks = []
 
     min_cluster_size = 1
-    max_cluster_size = 100
+    max_cluster_size = 20
 
     for i in range(num_frames):
         current_frame = frames[i]
@@ -124,9 +124,16 @@ def detect_damaged_pixels(frames, plot=False, consecutive_threshold=5, brightnes
     
     cleaned_masks = [None if m is None else (m & ~persistent_pixels)
                      for m in damaged_pixel_masks]
+    
+    #initial heatmap calculation and static hotspot suppression
+    init_heatmap = find_damaged_pixel_heatmap(height, width, frames, cleaned_masks, brightness_threshold)
+    static_mask = init_heatmap > static_threshold
+    persistent_pixels |= static_mask
+
+    final_masks = [m & ~persistent_pixels for m in cleaned_masks]
 
     # find estimated number of damaged pixels in bright areas
-    bright_area_estimates = find_bright_area_estimates(frames, cleaned_masks,
+    bright_area_estimates = find_bright_area_estimates(frames, final_masks,
         brightness_threshold)
 
 
@@ -137,21 +144,26 @@ def detect_damaged_pixels(frames, plot=False, consecutive_threshold=5, brightnes
     #compute optical flow metrics on the original frames
     optical_flows = compute_optical_flow_metric(frames)
 
-    frames, total_damaged_pixel_counts, masks_after_flow, optical_flows = \
-        filter_frames_by_optical_flow(frames, total_damaged_pixel_counts, optical_flows, cleaned_masks, flow_threshold)
+    frames_f, total_damaged_pixel_counts, masks_f, optical_flows = \
+        filter_frames_by_optical_flow(frames, total_damaged_pixel_counts, optical_flows, final_masks, flow_threshold)
     
+    post_heatmap = find_damaged_pixel_heatmap(height, width, frames_f, masks_f, brightness_threshold)
+    new_static = post_heatmap > static_threshold
+
+    masks_f = [m & ~new_static for m in masks_f]
+    counts_f = [int(m.sum()) for m in masks_f]
 
     # create plots
     if plot:
         for i in range(number_of_plots):
-            visualize_damaged_pixels(frames[i], masks_after_flow[i], total_damaged_pixel_counts[i])
+            visualize_damaged_pixels(frames_f[i], masks_f[i], counts_f[i])
 
         #calculate heatmap of damaged pixels
-        heatmap = find_damaged_pixel_heatmap(height, width, frames,
-        masks_after_flow, brightness_threshold)#check this threshold
+        heatmap = find_damaged_pixel_heatmap(height, width, frames_f,
+        masks_f, brightness_threshold)#check this threshold
         plot_heatmap(heatmap, title = "Damaged Pixel Heatmap")
 
-        plot_damaged_pixels(total_damaged_pixel_counts)
+        plot_damaged_pixels(counts_f)
 
     return total_damaged_pixel_counts
 
@@ -443,30 +455,25 @@ def filter_frames_by_optical_flow(frames, pixel_counts, optical_flows, damaged_p
     return filtered_frames, filtered_counts, filtered_masks, filtered_flows
 
 
-@njit(parallel = True)
 def find_damaged_pixel_heatmap(height, width, frames, damaged_pixel_masks, brightness_threshold):
     """
     produces heatmap of damaged pixel occurrences
     can be used to verify uniformity of damaged pixels (unless frames contain 
         a lot of bright noise, which will be excluded on the heatmap)
     """
+    MIN_VALID_FRAMES = 10
 
-    heatmap = np.zeros((height, width), dtype = np.float32)
-    valid_pixel_counts = np.zeros((height, width), dtype = np.float32)
+    mask_stack = np.stack([m.astype(np.uint8) for m in damaged_pixel_masks], axis = 0)
+    frame_stack = np.stack(frames, axis = 0)
 
-    for i, (frame, mask) in enumerate(zip(frames, damaged_pixel_masks)):
-        if mask is not None:
-            heatmap += mask.astype(np.float32)
-            high_brightness_mask = (frame > brightness_threshold) & ~mask
-            valid_pixel_counts += (~high_brightness_mask).astype(np.float32)
+    heatmap = mask_stack.sum(axis = 0)
 
+    bright_stack = (frame_stack > brightness_threshold) & (~mask_stack.astype(bool))
+    valid_counts = (~bright_stack).sum(axis = 0)
 
     result = np.zeros_like(heatmap, dtype = np.float64)
-
-    for x in range(height):
-        for y in range(width):
-            if valid_pixel_counts[x, y] > 0:
-                result[x, y] = (heatmap[x, y] / valid_pixel_counts[x, y]) * 100
+    mask = valid_counts > MIN_VALID_FRAMES
+    result[mask] = heatmap[mask] / valid_counts[mask] * 100
 
     return result
 
