@@ -113,7 +113,7 @@ def detect_damaged_pixels(frames, plot=False, consecutive_threshold=5, brightnes
         #     min_cluster_size, max_cluster_size, min_circularity = 0.5)
         filtered_damaged_pixels, _, _, _ = filter_damaged_pixel_clusters(
             current_frame, damaged_pixels_uint8, min_cluster_size,
-            max_cluster_size, min_circularity = 0.5, circularity_size_threshold=10
+            max_cluster_size, min_circularity = 0.1, circularity_size_threshold=10
         )
 
         filtered_damaged_pixels = remove_bright_regions(background, brightness_threshold,
@@ -171,7 +171,7 @@ def detect_damaged_pixels(frames, plot=False, consecutive_threshold=5, brightnes
     for frame, mask in zip(frames_f, masks_f):
         cleaned_mask, cc, avg_s, avg_b = filter_damaged_pixel_clusters(
             frame, mask.astype(np.uint8), min_cluster_size,
-            max_cluster_size, min_circularity = 0.5, circularity_size_threshold=10
+            max_cluster_size, min_circularity = 0.1, circularity_size_threshold=10
         )
 
         cluster_counts.append(cc)
@@ -261,11 +261,9 @@ def filter_damaged_pixel_clusters(frame, damaged_pixel_mask, min_cluster_size, m
     """
 
     # close gaps (test)
-    kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3, 3))
-    closed_mask = cv2.morphologyEx(damaged_pixel_mask.astype(np.uint8), cv2.MORPH_CLOSE, kernel)
 
     # isolate groups of damaged pixels
-    num_labels, labels, stats, _ = cv2.connectedComponentsWithStats(closed_mask,
+    num_labels, labels, stats, _ = cv2.connectedComponentsWithStats(damaged_pixel_mask,
         connectivity = 8)
     
     # prepare outputs
@@ -639,62 +637,91 @@ def create_isotropic_test_video(num_frames=1000, width=928, height=576, damaged_
     return frames
 
 
-def create_clustered_test_video(num_frames = 100, width = 928, height = 576,
-                                cluster_count = 50, cluster_size_range = (10, 20),
-                                background_intensity = 0):
+def create_clustered_test_video(num_frames=100,
+                                width=928,
+                                height=576,
+                                cluster_count=50,
+                                cluster_size_range=(10, 10),
+                                background_intensity=0):
     """
-    creates test video comprising of small clusters of damaged pixels
-    in order to test large damaged pixel region filtering
+    Creates a list of `num_frames` grayscale frames (height×width).
+    Each frame has `cluster_count` small clusters of 255-valued pixels, 
+    where each cluster is guaranteed to be 8-connected.
+
+    Returns:
+        frames: List[np.ndarray] of shape (height, width), dtype=uint8
+        cluster_pixel_count_records: List[int] (total damaged pixels per frame)
     """
 
     frames = []
     cluster_pixel_count_records = []
 
     for _ in range(num_frames):
-        frame = np.full((height, width), background_intensity, dtype = np.uint8)
+        # Start with a uniform background
+        frame = np.full((height, width), background_intensity, dtype=np.uint8)
+
         total_damaged_pixels = 0
-        occupied_pixels = set()
-        cluster_centers = []
+        occupied_pixels = set()     # (x,y) that are already used by ANY cluster in this frame
+        cluster_centers = []        # So we don’t overlap clusters too closely
 
         for _ in range(cluster_count):
-            cluster_size = random.randint(*cluster_size_range)
-            cluster_pixels = set()
-            overlap_detected = True #avoids damaged pixels being placed in the
-                # same place twice to avoid double counting
+            # 1) Pick a random center that is not too close to an existing cluster‐center
             tries = 0
-
-            while overlap_detected and tries < 10:
-                cluster_center_x = random.randint(0, width - 1)
-                cluster_center_y = random.randint(0, height - 1)
-
-                overlap_detected = any(abs(cluster_center_x - cx) < 20 and abs(cluster_center_y -
-                    cy) < 20 for cx, cy in cluster_centers)
-
-                if not overlap_detected:
-                    cluster_centers.append((cluster_center_x, cluster_center_y))
-
-                    placed_pixels = 0
-                    cluster_pixels.clear()
-
-                    while placed_pixels < cluster_size:
-                        dx = random.randint(-3, 3)
-                        dy = random.randint(-3, 3)
-
-                        x = np.clip(cluster_center_x + dx, 0, width - 1)
-                        y = np.clip(cluster_center_y + dy, 0, height - 1)
-
-                        if (x, y) not in occupied_pixels:
-                            cluster_pixels.add((x, y))
-                            placed_pixels += 1
-
+            while True:
+                cx = random.randint(0, width - 1)
+                cy = random.randint(0, height - 1)
+                # Only accept if it’s at least ~20 pixels away from any other cluster center
+                if not any(abs(cx - px) < 20 and abs(cy - py) < 20 for (px, py) in cluster_centers):
+                    cluster_centers.append((cx, cy))
+                    break
                 tries += 1
+                if tries > 50:
+                    # fallback: just accept whatever
+                    cluster_centers.append((cx, cy))
+                    break
 
-            if not overlap_detected:
-                for x, y in cluster_pixels:
-                    frame[y, x] = 255
-                    occupied_pixels.add((x, y))
+            # 2) Decide how many pixels this cluster should have:
+            cluster_size = random.randint(*cluster_size_range)
 
-                total_damaged_pixels += len(cluster_pixels)
+            # 3) Build an 8-connected blob of exactly `cluster_size` pixels.
+            this_cluster = set()
+            this_cluster.add((cx, cy))
+            occupied_pixels.add((cx, cy))
+
+            # We keep a list (or list‐view) of current cluster pixels to choose from
+            cluster_list = [(cx, cy)]
+
+            while len(this_cluster) < cluster_size:
+                # Pick a random pixel that’s already in the cluster, then pick one of its 8 neighbors
+                px, py = random.choice(cluster_list)
+
+                # pick one of the 8 neighbors (dx, dy both in {–1, 0, +1}, not both zero)
+                dx = random.choice([-1, 0, +1])
+                dy = random.choice([-1, 0, +1])
+                if dx == 0 and dy == 0:
+                    continue  # skip “no move”
+
+                nx = px + dx
+                ny = py + dy
+
+                # make sure it’s inside the frame
+                if not (0 <= nx < width and 0 <= ny < height):
+                    continue
+
+                # also, skip if another cluster pixel (or this cluster pixel) already occupies it
+                if (nx, ny) in occupied_pixels:
+                    continue
+
+                # finally, accept (nx, ny)
+                this_cluster.add((nx, ny))
+                cluster_list.append((nx, ny))
+                occupied_pixels.add((nx, ny))
+
+            # 4) Paint this cluster’s pixels as “255” in the frame
+            for (x, y) in this_cluster:
+                frame[y, x] = 255
+
+            total_damaged_pixels += len(this_cluster)
 
         frames.append(frame)
         cluster_pixel_count_records.append(total_damaged_pixels)
