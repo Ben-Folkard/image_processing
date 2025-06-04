@@ -188,7 +188,8 @@ def detect_damaged_pixels(frames, plot=False, consecutive_threshold=5, brightnes
         masks_f, brightness_threshold)#check this threshold
         plot_heatmap(heatmap, title = "Damaged Pixel Heatmap")
 
-        plot_damaged_pixels(counts_f)
+        #plot_damaged_pixels(counts_f)
+        plot_cluster_metrics(cluster_counts, avg_cluster_sizes=avg_cluster_sizes, avg_brightnesses=avg_brightnesses)
 
     return total_damaged_pixel_counts, cluster_counts, avg_cluster_sizes, avg_brightnesses
 
@@ -614,6 +615,31 @@ def plot_damaged_pixels(damaged_pixel_counts):
     plt.ylabel('Number of Damaged Pixels')
     plt.title('Damaged Pixels Detected Over Time')
     plt.legend()
+    plt.show()
+
+
+def plot_cluster_metrics(cluster_counts, avg_cluster_sizes, avg_brightnesses):
+    plt.figure(figsize = (15, 10))
+    plt.plot(cluster_counts, label = "Damaged Pixel Cluster Count")
+    plt.xlabel("Frame Index")
+    plt.ylabel("Number of Clusters")
+    plt.title("Damaged Pixel Cluster Count")
+    plt.legend()
+    plt.show()
+
+    plt.figure(figsize = (15, 10))
+    plt.plot(avg_cluster_sizes, label = "Mean Cluster Size")
+    plt.xlabel("Frame Index")
+    plt.ylabel("Mean Cluster Size (pixels)")
+    plt.title("Mean Cluster Size")
+    plt.show()
+
+
+    plt.figure(figsize=(15, 10))
+    plt.plot(avg_brightnesses, label = "Mean Cluster Brightness")
+    plt.xlabel("Frame Index")
+    plt.ylabel("Mean Cluster Brightness")
+    plt.title("Mean Cluster Brightness Over Frames")
     plt.show()
 
 
