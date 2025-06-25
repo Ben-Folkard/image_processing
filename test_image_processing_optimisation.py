@@ -534,3 +534,171 @@ def test_filter_damaged_pixel_clusters():
     # two clusters survive => cleaned_mask has 4 True entries
     assert count == 1
     assert np.sum(cleaned_mask) == 2
+
+
+def test_remove_bright_regions_negative():
+    "frame with no bright regions"
+    background = np.array([[50, 60], [70, 80]], dtype=float)
+
+    bright_threshold = 100
+
+    # add a single damaged pixel
+    damaged_pixel_mask = np.zeros((2, 2), bool)
+    damaged_pixel_mask[1, 1] = True
+
+    cleaned_mask = ip.remove_bright_regions(background, bright_threshold,
+                                            damaged_pixel_mask, 2)
+
+    assert np.array_equal(cleaned_mask, damaged_pixel_mask)
+
+
+def test_remove_bright_regions_positive():
+    "frame with bright regions"
+    background = np.array([[200, 200, 10],
+                           [200, 200, 10],
+                           [10, 10, 10]])
+
+    bright_threshold = 100
+
+    damaged_pixel_mask = np.zeros((3, 3), bool)
+    cleaned_mask = ip.remove_bright_regions(background, bright_threshold,
+                                            damaged_pixel_mask, 2)
+
+    assert np.array_equal(damaged_pixel_mask, cleaned_mask)
+
+
+def test_estimate_damaged_pixels_in_bright_areas():
+    "nonzero damaged pixel density"
+    frames = [
+        np.array([[10, 10], [200, 200]], float),
+        np.array([[255, 255], [255, 255]], float),
+    ]
+
+    damaged_pixel_masks = [
+        np.array([[True, False], [False, False]]),
+        np.array([[False, False], [False, False]]),
+    ]
+
+    output = ip.estimate_damaged_pixels_in_bright_areas(
+        frames,
+        damaged_pixel_masks,
+        brightness_threshold=100
+        )
+
+    assert output.shape == (2,)
+    # density of frame 1 should be ((1 damaged / 1 valid) * 2 bright) = 2
+    assert output[0] == pytest.approx(2.0)
+    assert np.isnan(output[1])
+
+
+def test_estimate_damaged_pixels_in_bright_areas_fail():
+    "zero low brightness area"
+    frames = [np.array([[200, 200], [200, 200]], float)]
+    damaged_pixel_masks = [np.array([[False, True], [False, False]], float)]
+
+    output = ip.estimate_damaged_pixels_in_bright_areas(
+        frames,
+        damaged_pixel_masks,
+        brightness_threshold=100
+    )
+
+    assert output.shape == (1,)
+    assert np.isnan(output[0])
+
+
+def test_find_bright_area_estimates():
+    frames = [np.array([[150, 200], [50, 80]]),
+              np.array([[10, 20], [30, 40]])]
+    masks = [np.array([[False, False], [False, False]]), None]
+
+    output = ip.find_bright_area_estimates(frames, masks,
+                                           brightness_threshold=170)
+
+    assert output.shape == (2,)
+
+    # frame 1 has 1 bright pixel and zero damaged
+    assert output[0] == pytest.approx(0)
+    assert np.isnan(output[1])
+
+
+def test_compute_optical_flow_metric_identical_frames():
+    # initialise identical dark frames
+    frame = np.zeros((8, 8), dtype=np.uint8)
+    optical_flows = ip.compute_optical_flow_metric([frame, frame.copy(),
+                                                   frame.copy()])
+
+    assert optical_flows[0] == pytest.approx(0.0)
+    assert np.allclose(optical_flows, [0.0, 0.0, 0.0])
+
+
+def test_compute_optical_flow_metric_different_frames():
+    frame0 = np.zeros((10, 10), dtype=float)
+    frame1 = np.zeros_like(frame0)
+
+    # add a single bright pixel in each frame
+    frame0[3, 3] = 255
+    frame1[7, 7] = 255
+
+    optical_flows = ip.compute_optical_flow_metric([frame0, frame1])
+    assert optical_flows.shape == (2,)
+    assert optical_flows[0] == pytest.approx(0.0)
+    assert optical_flows[1] > 0.0
+
+
+def test_filter_frames_by_optical_flow():
+    frames = [
+        [np.array([[10, 20], [30, 40]])],
+        [np.array([[11, 21], [31, 41]])],
+        [np.array([[12, 22], [32, 42]])],
+        [np.array([[13, 23], [33, 43]])],
+    ]
+
+    damaged_pixel_masks = [
+        [np.array([[False, True], [False, False]])],
+        [np.array([[False, True], [True, False]])],
+        [np.array([[True, True], [False, True]])],
+        [np.array([[True, True], [True, True]])],
+    ]
+
+    damaged_pixel_counts = np.array([1, 2, 3, 4])
+    optical_flows = [0.0, 0.5, 3.0, 1.0]
+
+    output_frames, output_counts, output_masks, output_flows = \
+        ip.filter_frames_by_optical_flow(frames, damaged_pixel_counts,
+                                         optical_flows, damaged_pixel_masks, 2)
+
+    expected_frames = [
+        [np.array([[10, 20], [30, 40]])],
+        [np.array([[11, 21], [31, 41]])],
+        [np.array([[13, 23], [33, 43]])],
+    ]
+
+    expected_masks = [
+        [np.array([[False, True], [False, False]])],
+        [np.array([[False, True], [True, False]])],
+        [np.array([[True, True], [True, True]])],
+    ]
+
+    expected_counts = np.array([1, 2, 4])
+    expected_flows = [0.0, 0.5, 1.0]
+
+    assert np.array_equal(output_frames, expected_frames)
+    assert np.array_equal(output_counts, expected_counts)
+    assert np.array_equal(output_masks, expected_masks)
+    assert np.array_equal(output_flows, expected_flows)
+
+
+def test_find_damaged_pixel_heatmap():
+    frames = [np.array([[50, 200], [60, 70]], dtype=np.uint8) for
+              _ in range(20)]
+
+    damaged_pixel_masks = [np.array([[True, False], [False, False]]) for
+                           _ in range(20)]
+
+    result = ip.find_damaged_pixel_heatmap(frames, damaged_pixel_masks,
+                                           brightness_threshold=170)
+
+    assert result[0, 0] == pytest.approx(100.0)
+    assert result[0, 1] == 0.0
+    assert result[1, 0] == 0.0
+    assert result[1, 1] == 0.0
