@@ -23,6 +23,8 @@ jobs:
           python -m pip install --upgrade pip
           pip install pytest
           pip install opencv-python
+          pip install requests
+          pip install numpy
 
       - name: run tests
         run: pytest -v
