@@ -939,3 +939,4 @@ if __name__ == "__main__":
     print("sizes:", results["averages_size"])
     print("brightness:", results["averages_brightness"])
     print("times:", results["times"])
+
