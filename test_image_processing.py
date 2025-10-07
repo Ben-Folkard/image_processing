@@ -1,5 +1,5 @@
 """
-test_image_processing_optimisation.py
+test_image_processing.py
 
 contains unit tests for the image_processing code
 
@@ -12,7 +12,7 @@ import cv2
 import pytest
 import requests
 import numpy as np
-import image_processing_optimisation as ip
+import image_processing as ip
 
 
 class FakeResponse:
@@ -702,3 +702,4 @@ def test_find_damaged_pixel_heatmap():
     assert result[0, 1] == 0.0
     assert result[1, 0] == 0.0
     assert result[1, 1] == 0.0
+
