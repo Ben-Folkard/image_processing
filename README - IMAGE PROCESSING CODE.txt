@@ -5,23 +5,23 @@ LAST MODIFIED 07/10/25
 
 hi, this should be everything you need to know to start using the code :)
 if any problems or questions arise feel free to contact me!
-will be making a few amendments to comments/readability in the next few weeks, nothing profound and nothing that will edit any functionality
+will be making a few amendments to comments/readability in the next few weeks, nothing profound and nothing that will edit any functionality (NOTE: i just renamed a few files, everything should be accounted for but if an import error arises it will probably be that, so check the names of everything)
 i apologise in advance about the efficiency (and the linting)
 
-FILE DESCRIPTIONS
+FILE DESCRIPTIONS:
 image_processing.ipynb
 a jupyter notebook, used to play around with the main module, generate images, observe various metrics from video snippets
 
 image_processing_flowchart.png
 used in a poster, details basic code logic of main module (NOTE: THIS IS OUTDATED! will update soon, some functions have been reordered since for efficiency)
 
-image_processing_optimisation.py
-the main module (i will rename this!! as it is far from optimised lol, just a relic from when i first started building the code)
+image_processing.py
+the main module, contains all the code functions, written for use on scarf
 
-image_processing_optimisation_script.sh
+image_processing_script.sh
 the shell script i used with scarf, all parameters should be fine as they are but adjust if desired
 
-test_image_processing_optimisation.py
+test_image_processing.py
 contains all my unit tests, coverage isn't exactly extensive but most functions have basic tests implemented
 
 NOTES:
