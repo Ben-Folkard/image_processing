@@ -11,4 +11,5 @@ module load numba/0.58.1-foss-2023a
 
 cd "/home/vol08/scarf1378"
 
-python image_processing_optimisation.py 11_01_H_170726081325.avi
+python image_processing.py 11_01_H_170726081325.avi
+
