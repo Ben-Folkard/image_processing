@@ -679,7 +679,8 @@ def filter_frames_by_optical_flow(
         pixel_counts,
         optical_flows,
         damaged_pixel_masks,
-        threshold):
+        threshold,
+        removed_displayed=False):
     """
     filters out frames whose optical flow exceeds the given threshold.
     frames with optical flow above the threshold are removed entirely from the
@@ -707,7 +708,9 @@ def filter_frames_by_optical_flow(
             filtered_masks.append(mask)
             filtered_flows.append(flow)
 
-    print(f"Removed {removed_counter} frames due to high optical flow")
+    # *Added option to not print as it was just cluttering up and slowing down the output*
+    if removed_displayed:
+        print(f"Removed {removed_counter} frames due to high optical flow")
 
     return filtered_frames, filtered_counts, filtered_masks, filtered_flows
 

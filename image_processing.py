@@ -83,6 +83,58 @@ def load_video_frames(filename, frames_start=None, frames_end=None):
 
     cap.release()
     return frames
+    
+
+# Alternative 1
+"""
+def load_video_frames(filename, frames_start=None, frames_end=None, grayscale=True):
+    cap = cv2.VideoCapture(filename)
+    if not cap.isOpened():
+        raise IOError(f"Cannot open video: {filename}")
+
+    total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+    height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+    width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+
+    start = frames_start or 0
+    end = frames_end or total_frames
+    n_frames = max(0, end - start)
+
+    cap.set(cv2.CAP_PROP_POS_FRAMES, start)
+    frames = np.empty((n_frames, height, width), dtype=np.uint8)
+
+    i = 0
+    while i < n_frames:
+        ret, frame = cap.read()
+        if not ret:
+            break
+        if grayscale and len(frame.shape) == 3:
+            frame = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+        frames[i] = frame
+        i += 1
+
+    cap.release()
+
+    return frames[:i]
+"""
+
+
+# If the gpu version is installed:
+"""
+def load_video_frames_gpu(filename, frames_start=None, frames_end=None):
+    import cv2
+    import numpy as np
+
+    reader = cv2.cudacodec.createVideoReader(filename)
+    frames = []
+    while True:
+        ret, gpu_frame = reader.nextFrame()
+        if not ret:
+            break
+        gray = cv2.cuda.cvtColor(gpu_frame, cv2.COLOR_BGR2GRAY)
+        frames.append(gray.download())
+    return np.stack(frames)
+"""
 
 
 def get_video_frames_from_url(
@@ -142,6 +194,33 @@ def compute_background(frames, index, radius):
     neighbours = [f for i, f in enumerate(frames[start:end]) if i != radius]
 
     return _find_background(np.stack(neighbours))
+    
+
+# Possible Alternative
+"""
+def compute_background(frames, index, radius):
+    start = max(0, index - radius)
+    end = min(len(frames), index + radius + 1)
+    neighbours = frames[start:end]
+    center_idx = index - start
+    
+    # Either just this
+    mask = np.ones(len(neighbours), dtype=bool)
+    mask[center_idx] = False
+    neighbours = neighbours[mask]
+            
+    # Or go over safe and do this
+    if 0 <= center_idx < len(neighbours):
+        # frames shape (N, H, W)
+        if len(neighbours) > 1:
+            mask = np.ones(len(neighbours), dtype=bool)
+            mask[center_idx] = False
+            neighbours = neighbours[mask]
+        else:
+            return np.zeros_like(neighbours[0])
+
+    return _find_background(neighbours)
+"""
 
 
 def _find_background(frames):
@@ -778,13 +857,14 @@ def filter_frames_by_optical_flow(
         pixel_counts,
         optical_flows,
         damaged_pixel_masks,
-        threshold):
+        threshold,
+        removed_displayed=False):
     """
     filters out frames whose optical flow exceeds the given threshold.
     frames with optical flow above the threshold are removed entirely from the
     frames list, and their corresponding pixel counts and masks are discarded.
     """
-
+    # Use numpy arrays!
     removed_counter = 0
     filtered_frames = []
     filtered_counts = []
@@ -806,7 +886,9 @@ def filter_frames_by_optical_flow(
             filtered_masks.append(mask)
             filtered_flows.append(flow)
 
-    print(f"Removed {removed_counter} frames due to high optical flow")
+    # *Added option to not print as it was just cluttering up and slowing down the output*
+    if removed_displayed:
+        print(f"Removed {removed_counter} frames due to high optical flow")
 
     return filtered_frames, filtered_counts, filtered_masks, filtered_flows
 
