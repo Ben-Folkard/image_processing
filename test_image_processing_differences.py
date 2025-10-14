@@ -39,13 +39,14 @@ def time_func(func, args, repeat=5):
     "compute_background",
     "apply_static_suppression",
     "filter_frames_by_optical_flow",
+    "find_damaged_pixel_heatmap",
 ])
 def test_equivalence_and_benchmark(func_name, sample_frames, benchmark, tmp_path):
     func_old = getattr(ip_old, func_name)
     func_new = getattr(ip_new, func_name)
 
     have_funcs_run = False
-    
+
     # Preparing arguments for each function
     match func_name:
         case "_find_background":
@@ -79,10 +80,10 @@ def test_equivalence_and_benchmark(func_name, sample_frames, benchmark, tmp_path
                 persistent,
                 static_mask,
             )
-            
+
             final_masks_old, counts_old = func_old(*args)
             final_masks_new, counts_new = func_new(*args)
-            
+
             assert len(final_masks_old) == len(final_masks_new)
             for m_old, m_new in zip(final_masks_old, final_masks_new):
                 if m_old is None or m_new is None:
@@ -91,9 +92,9 @@ def test_equivalence_and_benchmark(func_name, sample_frames, benchmark, tmp_path
                     assert np.array_equal(m_old, m_new)
 
             assert np.allclose(counts_old, counts_new, atol=1e-6, equal_nan=True)
-            
+
             have_funcs_run = True
-            
+
         case "filter_frames_by_optical_flow":
             frames = np.array([
                 [[[10, 20], [30, 40]]],
@@ -128,8 +129,17 @@ def test_equivalence_and_benchmark(func_name, sample_frames, benchmark, tmp_path
             assert np.array_equal(output_counts_old, output_counts_new)
             assert np.array_equal(output_masks_old, output_masks_new)
             assert np.array_equal(output_flows_old, output_flows_new)
-            
+
             have_funcs_run = True
+        case "find_damaged_pixel_heatmap":
+            frames = [np.array([[50, 200], [60, 70]], dtype=np.uint8) for _ in range(20)]
+            damaged_pixel_masks = [np.array([[True, False], [False, False]]) for _ in range(20)]
+            brightness_threshold = 170
+            args = (
+                frames,
+                damaged_pixel_masks,
+                brightness_threshold
+            )
         case _:
             pytest.skip(f"No test data defined for {func_name}")
 

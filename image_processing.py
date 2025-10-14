@@ -83,7 +83,7 @@ def load_video_frames(filename, frames_start=None, frames_end=None):
 
     cap.release()
     return frames
-    
+
 
 # Alternative 1
 """
@@ -194,7 +194,7 @@ def compute_background(frames, index, radius):
     neighbours = [f for i, f in enumerate(frames[start:end]) if i != radius]
 
     return _find_background(np.stack(neighbours))
-    
+
 
 # Possible Alternative
 """
@@ -203,12 +203,12 @@ def compute_background(frames, index, radius):
     end = min(len(frames), index + radius + 1)
     neighbours = frames[start:end]
     center_idx = index - start
-    
+
     # Either just this
     mask = np.ones(len(neighbours), dtype=bool)
     mask[center_idx] = False
     neighbours = neighbours[mask]
-            
+
     # Or go over safe and do this
     if 0 <= center_idx < len(neighbours):
         # frames shape (N, H, W)
@@ -246,7 +246,7 @@ def _find_background(frames):
     return bg
 
 
-""" 
+"""
 # *Could add a rolling mean buffer so numpy arrays don't restack every frame
 # e.g. Something roughly along the lines of:
 from collections import deque
@@ -905,21 +905,41 @@ def find_damaged_pixel_heatmap(
     """
     MIN_VALID_FRAMES = 10
 
+    # *Could if the inputs are made to already be numpy arrays then mask_stack*
+    # *and frame_stack don't need to exist, but if that's not the case then*
+    # *the following could alternatively be done*
+    """
+    frame_stack = np.asarray(frames, dtype=np.uint8)
+    mask_stack = np.asarray(damaged_pixel_masks, dtype=bool)
+    """
     mask_stack = np.stack([m.astype(np.uint8) for m in damaged_pixel_masks],
                           axis=0)
     frame_stack = np.stack(frames, axis=0)
+    # *^~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~^*
 
     heatmap = mask_stack.sum(axis=0)
 
+    # *bright_stack = (frame_stack > brightness_threshold) & (~mask_stack)*
     bright_stack = (frame_stack > brightness_threshold) & \
         (~mask_stack.astype(bool))
-    valid_counts = (~bright_stack).sum(axis=0)
+    valid_counts = (~bright_stack).sum(axis=0)  # *could dtype=np.int32
 
+    """
+    with np.errstate(divide='ignore', invalid='ignore'):
+        ratio = np.where(
+            valid_counts > MIN_VALID_FRAMES,
+            heatmap / valid_counts * 100.0,
+            0.0,
+        ).astype(np.float32)
+    return ratio
+    """
+    # v~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~v
     result = np.zeros_like(heatmap, dtype=np.float64)
     mask = valid_counts > MIN_VALID_FRAMES
     result[mask] = heatmap[mask] / valid_counts[mask] * 100
 
     return result
+    # ^~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~^
 
 
 def visualise_damaged_pixels(
