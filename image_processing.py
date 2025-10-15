@@ -48,9 +48,8 @@ def download_video_from_url(url, filename):
     return filename
 
 
-"""
-# (old working)
-def load_video_frames(filename, frames_start=None, frames_end=None):
+# (old version)
+def load_video_frames(filename, frames_start=None, frames_end=None, grayscale=True):
     # loads in video frames as greyscale arrays with brightness values ranging
     # from 0 to 255 can load in specific chunk of frames from given video
     # (given frame start and end values as integers)
@@ -72,7 +71,7 @@ def load_video_frames(filename, frames_start=None, frames_end=None):
         if not ret:
             break
 
-        if len(frame.shape) == 3:
+        if grayscale and len(frame.shape) == 3:
             frame = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
         frames.append(frame)
 
@@ -80,10 +79,10 @@ def load_video_frames(filename, frames_start=None, frames_end=None):
 
     cap.release()
     return frames
+
+
 """
-
-
-# CPU version
+# CPU version (for unknown reasons ended up being slower)
 def load_video_frames(filename, frames_start=None, frames_end=None, grayscale=True):
     cap = cv2.VideoCapture(filename)
     if not cap.isOpened():
@@ -113,7 +112,7 @@ def load_video_frames(filename, frames_start=None, frames_end=None, grayscale=Tr
     cap.release()
 
     return frames[:i]
-
+"""
 
 """
 # If the gpu version is installed:
@@ -194,34 +193,7 @@ def compute_background(frames, index, radius):
     return _find_background(neighbours)
 
 
-# Possible Alternative
-"""
-def compute_background(frames, index, radius):
-    start = max(0, index - radius)
-    end = min(len(frames), index + radius + 1)
-    neighbours = frames[start:end]
-    center_idx = index - start
-
-    # Either just this
-    mask = np.ones(len(neighbours), dtype=bool)
-    mask[center_idx] = False
-    neighbours = neighbours[mask]
-
-    # Or go over safe and do this
-    if 0 <= center_idx < len(neighbours):
-        # frames shape (N, H, W)
-        if len(neighbours) > 1:
-            mask = np.ones(len(neighbours), dtype=bool)
-            mask[center_idx] = False
-            neighbours = neighbours[mask]
-        else:
-            return np.zeros_like(neighbours[0])
-
-    return _find_background(neighbours)
-"""
-
-
-def _find_background(frames):
+def _find_background(frames, pixel_std_coeff=1):
     """
     mean background calculation, used in compute_background()
     """
@@ -230,16 +202,14 @@ def _find_background(frames):
     pixel_std = frames.std(axis=0)
 
     # only take pixels which are not likely to be damaged
-    valid = frames <= pixel_means + 1 * pixel_std  # *1 is pointless, could instead be a passed in parameter*
+    valid = frames <= pixel_means + pixel_std_coeff * pixel_std
 
     # find background, excluding unusually bright pixels
-    # *v This whole secion can be replaced by bg = frames[valid].mean(axis=0) v*
     masked = np.where(valid, frames, np.nan)
     bg = np.nanmean(masked, axis=0)
 
     if np.isnan(bg).any():
         bg = np.nan_to_num(bg, nan=frames.mean(axis=0))
-    # *^ ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~^*
 
     return bg
 
@@ -288,11 +258,9 @@ def compute_persistent_mask(masks, consecutive_threshold):
             current_status[m] += 1
             current_status[~m] = 0
 
-        # *BUG: Should be longest_flag = np.maximum(longest_flag, current_status)*
-        longest = np.maximum(longest_flag, current_status)
+        longest_flag = np.maximum(longest_flag, current_status)
 
-    # *BUG: Should be return longest >= consecutive_threshold*
-    return longest >= consecutive_threshold
+    return longest_flag >= consecutive_threshold
 
 
 def filter_consecutive_pixels(masks, persistent):
@@ -327,26 +295,17 @@ def compute_cluster_stats(frames, masks, flows, settings):
     cluster_size = np.zeros(n, float)
     cluster_brightness = np.zeros(n, float)
 
-    # *possibly: for i in range(n):
-    # * or: for i, (frame, mask) in enumerate(zip(frames, masks, flows)):
-    for i, (frame, mask) in enumerate(zip(frames, masks)):
-        # *Possibly put lower loop in alternate if statment:
-        # if mask is not None and flows[i] <= settings.flow_threshold:
-        if mask is None or flows[i] > settings.flow_threshold:
-            continue
-        clean_uint8 = mask.astype(np.uint8)  # Might as well have this inside the function
-        _, count, avg_size, avg_brightness = filter_damaged_pixel_clusters(
-            frame,
-            clean_uint8,
-            settings.min_cluster_size,
-            settings.max_cluster_size,
-            settings.min_circularity
-        )
-        # *Feels like a waste to return clean_mask
-
-        # *Why not just imediatelly read them into the arrays?*
-        cluster_count[i], cluster_size[i], cluster_brightness[i] = \
-            count, avg_size, avg_brightness
+    # Vectorise: Need to alter filter_damaged_pixel_clusters
+    for i, (frame, mask, flow) in enumerate(zip(frames, masks, flows)):
+        if mask is not None and flow <= settings.flow_threshold:
+            _, cluster_count[i], cluster_size[i], cluster_brightness[i] = filter_damaged_pixel_clusters(
+                frame,
+                mask.astype(np.uint8),
+                settings.min_cluster_size,
+                settings.max_cluster_size,
+                settings.min_circularity
+            )
+            # *Feels like a waste to return clean_mask
 
     return cluster_count, cluster_size, cluster_brightness
 
@@ -356,23 +315,28 @@ def _get_final_count(masks, bright_estimates):
     gets final damaged pixel count, adding in the bright area estimates to
     the raw dark area count
     """
-    counts = []  # Should initialise as a numpy array
+    # counts = base noise + estimated radiation induced noise
+    # Possible bug: kept in the original possible bug where
+    # base still contains nans whilst estimate doesn't
+    counts = np.array([
+       (np.sum(mask) if mask is not None else np.nan) +
+       (estimate if not np.isnan(estimate) else 0)
+       for mask, estimate in zip(masks, bright_estimates)
+    ], dtype=float)
+
+    return counts
+
+
+"""
+# (old version)
+def _get_final_count(masks, bright_estimates):
+    counts = []
 
     for mask, estimate in zip(masks, bright_estimates):
         base = int(mask.sum()) if mask is not None else np.nan
-        # Possible BUG: Why does estimate get rid of nans but base doesn't
         counts.append(base + (estimate if not np.isnan(estimate) else 0))
 
     return np.array(counts, dtype=float)
-
-
-# *Alternatively could do:
-"""
-def _get_final_count(masks, bright_estimates):
-    base = np.nansum(masks, axis=1, dtype=np.float64)
-    counts = base + np.nan_to_num(bright_estimates)
-
-    return counts
 """
 
 
@@ -385,19 +349,10 @@ def _generate_plots(
     """
     generates plots for user
     """
-    # * Why not just do:
-    """
-    for i, (frame, mask, flow) in enumerate(zip(frames, masks, flows)):
-        if flow <= settings.flow_threshold:
-            visualise_damaged_pixels(frame, mask, i) *
-    """
-
     survivors = [i for i, flow in enumerate(flows) if flow <=
                  settings.flow_threshold]
     for i in survivors[:settings.number_of_plots]:
         visualise_damaged_pixels(frames[i], masks[i], i)
-
-    # *^~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~^*
 
     plot_damaged_pixels(counts)
     heatmap = find_damaged_pixel_heatmap(
@@ -419,21 +374,12 @@ def compute_static_mask(
     returns a boolean mask of pixels damaged for a
         percentage > static_threshold
     """
+    frames = np.asarray(frames)
+    masks = np.asarray(masks)
 
-    # *If frames and masks were defined as boolean numpy arrays the following:*
-    mask_stack = np.stack([m.astype(np.uint8) for m in masks], axis=0)  # *axis=0 by default anway*
-    frame_stack = np.stack(frames, axis=0)
-
-    heatmap = mask_stack.sum(axis=0)
-    bright = (frame_stack > brightness_threshold) & \
-        (~mask_stack.astype(bool))
-    valid_counts = (~bright).sum(axis=0)
-    # *Could just be:
-    """
     heatmap = masks.astype(np.uint8).sum(axis=0)
     bright = (frames > brightness_threshold) & (~masks)
-    valid_counts = (~bright).sum(axis=0)*
-    """
+    valid_counts = (~bright).sum(axis=0)
 
     percentage_map = np.zeros_like(heatmap, dtype=float)
     good = valid_counts > min_valid_frames
@@ -444,11 +390,9 @@ def compute_static_mask(
 
 def apply_static_suppression(masks, persistent, static_mask):
     bad = persistent | static_mask
-    # *Probably should be numpy arrays*
     final_masks = []
     counts = []
 
-    # Again is very easy to parallelise
     for m in masks:
         if m is None:
             final_masks.append(None)
@@ -458,6 +402,48 @@ def apply_static_suppression(masks, persistent, static_mask):
             final_masks.append(final_mask)
             counts.append(int(final_mask.sum()))
     return final_masks, np.array(counts, dtype=float)
+
+
+""" (Also somehow slower)
+def apply_static_suppression(masks, persistent, static_mask):
+    bad = persistent | static_mask
+    final_masks = []
+    counts = np.full(len(masks), np.nan, dtype=np.float64)
+
+    for i, mask in enumerate(masks):
+        if mask is None:
+            final_masks.append(None)
+        else:
+            final_mask = mask & ~bad
+            final_masks.append(final_mask)
+            counts[i] = int(final_mask.sum())
+    return final_masks, counts
+"""
+
+""" (Ended up being slower)
+def apply_static_suppression(masks, persistent, static_mask):
+    bad = np.logical_or(persistent, static_mask)
+
+    # Separate valid masks
+    valid_indices = [i for i, m in enumerate(masks) if m is not None]
+    if not valid_indices:
+        return masks, np.full(len(masks), np.nan)
+
+    # Stack only valid ones to work in batch
+    stacked = np.stack([masks[i] for i in valid_indices])
+    suppressed = np.logical_and(stacked, ~bad)  # vectorized suppression
+
+    # Replace back into original list
+    final_masks = list(masks)
+    for idx, m in zip(valid_indices, suppressed):
+        final_masks[idx] = m
+
+    # Compute counts (vectorized where possible)
+    counts = np.full(len(masks), np.nan)
+    counts[valid_indices] = suppressed.sum(axis=(1, 2))
+
+    return final_masks, counts
+"""
 
 
 def detect_damaged_pixels(
@@ -478,7 +464,7 @@ def detect_damaged_pixels(
     """
     # unpack and prepare inputs
     settings = _prepare_settings(params)
-    frames = [np.array(f) for f in frames]  # Why not just define the whole thing as a numpy array
+    frames = np.asarray(frames)
 
     # optical flow screening
     optical_flows = compute_optical_flow_metric(frames)
@@ -801,23 +787,21 @@ def find_bright_area_estimates(
 
     bright_area_estimates = np.full(len(frames), np.nan, dtype=np.float64)
 
+    estimate = estimate_damaged_pixels_in_bright_areas(frames, damaged_pixel_masks)
+
     for i, (frame, mask) in enumerate(zip(frames, damaged_pixel_masks)):
-        if mask is None:
-            bright_area_estimates[i] = np.nan  # *That's redundant, it's already defined to be?*
-            continue
+        if mask is not None:
+            high_brightness_mask = (frame > brightness_threshold) & ~mask
 
-        high_brightness_mask = (frame > brightness_threshold) & ~mask
-
-        if np.sum(high_brightness_mask) > 0:  # *high_brightness_mask.sum() exists*
-            estimate = estimate_damaged_pixels_in_bright_areas(  # *BUG: Should calculate estimate before the for loop*
-                frames, damaged_pixel_masks)  # *as it already loops through every frame and every damaged pixel mask*
-            bright_area_estimates[i] = estimate[i]
-        else:
-            bright_area_estimates[i] = np.nan
+            if high_brightness_mask.sum() > 0:
+                bright_area_estimates[i] = estimate[i]
+            else:
+                bright_area_estimates[i] = np.nan
 
     return bright_area_estimates
 
 
+# There are performance gains to be made if the gpu version (CUDA version) of cv2 is installed
 def compute_optical_flow_metric(frames):
     """
     computes the average optical flow magnitude between consecutive frames
@@ -826,7 +810,7 @@ def compute_optical_flow_metric(frames):
     returns an array of optical flow magnitudes for each frame (first frame is
         assigned 0).
     """
-    optical_flows = [0.0]
+    optical_flows = np.full(len(frames), 0.0)
 
     for i in range(1, len(frames)):  # *Feels like this could be very easily parallised*
         prev_frame = frames[i - 1].astype(np.float32)
@@ -842,12 +826,10 @@ def compute_optical_flow_metric(frames):
             poly_n=5,
             poly_sigma=2,
             flags=0)
-        mag, _ = cv2.cartToPolar(flow[..., 0], flow[..., 1])
-        # *Pointlessly calculating angle (mag = np.linalg.norm(flow, axis=0))*
-        # *Would have to check my alternative doesn't overcount the number of columns*
-        optical_flows.append(np.mean(mag))
+        # Finds the means of the magnitudes of the flow vectors
+        optical_flows[i] = np.mean(cv2.cartToPolar(flow[..., 0], flow[..., 1])[0])
 
-    return np.array(optical_flows)  # *Better to just initially define it as a numpy array of len(frames)*
+    return optical_flows
 
 
 def filter_frames_by_optical_flow(
@@ -862,30 +844,20 @@ def filter_frames_by_optical_flow(
     frames with optical flow above the threshold are removed entirely from the
     frames list, and their corresponding pixel counts and masks are discarded.
     """
-    # Use numpy arrays!
-    removed_counter = 0
-    filtered_frames = []
-    filtered_counts = []
-    filtered_masks = []
-    filtered_flows = []
+    frames = np.asarray(frames)
+    pixel_counts = np.asarray(pixel_counts)
+    optical_flows = np.asarray(optical_flows)
+    damaged_pixel_masks = np.asarray(damaged_pixel_masks)
 
-    for frame, count, flow, mask in zip(
-        frames,
-        pixel_counts,
-        optical_flows,
-        damaged_pixel_masks
-    ):
-        if flow > threshold:
-            removed_counter += 1
-
-        else:
-            filtered_frames.append(frame)
-            filtered_counts.append(count)
-            filtered_masks.append(mask)
-            filtered_flows.append(flow)
+    valid = optical_flows <= threshold
+    filtered_frames = frames[valid]
+    filtered_counts = pixel_counts[valid]
+    filtered_masks = damaged_pixel_masks[valid]
+    filtered_flows = optical_flows[valid]
 
     # *Added option to not print as it was just cluttering up and slowing down the output*
     if removed_displayed:
+        removed_counter = len(frames)-len(filtered_frames)
         print(f"Removed {removed_counter} frames due to high optical flow")
 
     return filtered_frames, filtered_counts, filtered_masks, filtered_flows
@@ -903,41 +875,22 @@ def find_damaged_pixel_heatmap(
     """
     MIN_VALID_FRAMES = 10
 
-    # *Could if the inputs are made to already be numpy arrays then mask_stack*
-    # *and frame_stack don't need to exist, but if that's not the case then*
-    # *the following could alternatively be done*
-    """
-    frame_stack = np.asarray(frames, dtype=np.uint8)
-    mask_stack = np.asarray(damaged_pixel_masks, dtype=bool)
-    """
-    mask_stack = np.stack([m.astype(np.uint8) for m in damaged_pixel_masks],
-                          axis=0)
-    frame_stack = np.stack(frames, axis=0)
-    # *^~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~^*
+    
+    frame_stack = np.asarray(frames)
+    mask_stack = np.asarray(damaged_pixel_masks)
 
     heatmap = mask_stack.sum(axis=0)
 
-    # *bright_stack = (frame_stack > brightness_threshold) & (~mask_stack)*
-    bright_stack = (frame_stack > brightness_threshold) & \
-        (~mask_stack.astype(bool))
-    valid_counts = (~bright_stack).sum(axis=0)  # *could dtype=np.int32
+    bright_stack = (frame_stack > brightness_threshold) & (~mask_stack)
+    valid_counts = (~bright_stack).sum(axis=0)
 
-    """
     with np.errstate(divide='ignore', invalid='ignore'):
-        ratio = np.where(
+        result = np.where(
             valid_counts > MIN_VALID_FRAMES,
             heatmap / valid_counts * 100.0,
             0.0,
-        ).astype(np.float32)
-    return ratio
-    """
-    # v~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~v
-    result = np.zeros_like(heatmap, dtype=np.float64)
-    mask = valid_counts > MIN_VALID_FRAMES
-    result[mask] = heatmap[mask] / valid_counts[mask] * 100
-
+        )
     return result
-    # ^~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~^
 
 
 def visualise_damaged_pixels(
