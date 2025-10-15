@@ -48,24 +48,22 @@ def download_video_from_url(url, filename):
     return filename
 
 
+"""
+# (old working)
 def load_video_frames(filename, frames_start=None, frames_end=None):
-    """
-    loads in video frames as greyscale arrays with brightness values ranging
-    from 0 to 255 can load in specific chunk of frames from given video
-    (given frame start and end values as integers)
-    requires video filename as string
-    """
+    # loads in video frames as greyscale arrays with brightness values ranging
+    # from 0 to 255 can load in specific chunk of frames from given video
+    # (given frame start and end values as integers)
+    # requires video filename as string
 
-    cap = cv2.VideoCapture(filename)  # *Why not just pass in the previously defined cap rather than doing this every time*
+    cap = cv2.VideoCapture(filename)
     frames = []
 
     if frames_start:
         cap.set(cv2.CAP_PROP_POS_FRAMES, frames_start)
 
-    frame_idx = frames_start or 0  # *Very hacky way of doing this, not sure it's in general best practice
-    # (defines as 0 instead of None or just leaves a passed in value)
+    frame_idx = frames_start or 0
 
-    # I assume this was an attempt at trying to get it run in parallel though currently it's just very inefficient
     while cap.isOpened():
         if frames_end and frame_idx >= frames_end:
             break
@@ -75,18 +73,17 @@ def load_video_frames(filename, frames_start=None, frames_end=None):
             break
 
         if len(frame.shape) == 3:
-            # Converts image to greyscale
-            frame = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)  # Worth it to test whether it can do multiple frames at once
+            frame = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
         frames.append(frame)
 
         frame_idx += 1
 
     cap.release()
     return frames
-
-
-# Alternative 1
 """
+
+
+# CPU version
 def load_video_frames(filename, frames_start=None, frames_end=None, grayscale=True):
     cap = cv2.VideoCapture(filename)
     if not cap.isOpened():
@@ -116,15 +113,11 @@ def load_video_frames(filename, frames_start=None, frames_end=None, grayscale=Tr
     cap.release()
 
     return frames[:i]
+
+
 """
-
-
 # If the gpu version is installed:
-"""
-def load_video_frames_gpu(filename, frames_start=None, frames_end=None):
-    import cv2
-    import numpy as np
-
+def load_video_frames(filename, frames_start=None, frames_end=None):
     reader = cv2.cudacodec.createVideoReader(filename)
     frames = []
     while True:
@@ -191,9 +184,14 @@ def compute_background(frames, index, radius):
     """
     start = max(0, index - radius)
     end = min(len(frames), index + radius + 1)
-    neighbours = [f for i, f in enumerate(frames[start:end]) if i != radius]
+    neighbours = np.asarray(frames[start:end])  # Tmp: once frames is a numpy array, this won't be necessary
+    center_idx = index - start
 
-    return _find_background(np.stack(neighbours))
+    mask = np.ones(len(neighbours), dtype=np.bool_)
+    mask[center_idx] = np.False_
+    neighbours = neighbours[mask]
+
+    return _find_background(neighbours)
 
 
 # Possible Alternative

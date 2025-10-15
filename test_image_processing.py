@@ -12,7 +12,19 @@ import cv2
 import pytest
 import requests
 import numpy as np
-import image_processing as ip
+import time
+import image_processing as ip  # _new
+# import image_processing_old as ip_old
+# ips = (ip_old, ip_new)
+
+
+def benchmark(func, args, repeat=5):
+    times = []
+    for _ in range(repeat):
+        start = time.perf_counter()
+        func(*args)
+        times.append(time.perf_counter() - start)
+    return float(np.mean(times))
 
 
 class FakeResponse:
@@ -29,10 +41,11 @@ class FakeVideo:
     def __init__(self, frames, start=0, fail_after=None):
         self.frames = frames
         self.idx = start
-        self.fail_after = fail_after if fail_after is not None else len(frames)
+        self.total_frames = len(frames)
+        self.fail_after = fail_after if fail_after is not None else self.total_frames
 
     def isOpened(self):
-        return self.idx < self.fail_after and self.idx < len(self.frames)
+        return self.idx < self.fail_after and self.idx < self.total_frames
 
     def read(self):
         if not self.isOpened():
@@ -47,6 +60,17 @@ class FakeVideo:
 
     def release(self):
         pass
+
+    def get(self, prop_id):
+        if prop_id == cv2.CAP_PROP_FRAME_COUNT:
+            return self.total_frames
+        elif prop_id == cv2.CAP_PROP_FRAME_HEIGHT:
+            return self.frames[0].shape[0]
+        elif prop_id == cv2.CAP_PROP_FRAME_WIDTH:
+            # Handle both grayscale (2D) and color (3D)
+            return self.frames[0].shape[1]
+        else:
+            return 0.0
 
 
 class DummySettings:
@@ -73,6 +97,7 @@ def test_download_success(tmp_path, monkeypatch, capsys):
     monkeypatch.setattr(requests, 'get', lambda url: fake_response)
 
     filename = tmp_path / "out.mp4"
+
     result = ip.download_video_from_url("http://example.com/video.mp4",
                                         str(filename))
 
@@ -702,4 +727,3 @@ def test_find_damaged_pixel_heatmap():
     assert result[0, 1] == 0.0
     assert result[1, 0] == 0.0
     assert result[1, 1] == 0.0
-

@@ -4,13 +4,13 @@ test_image_processing.py
 contains unit tests for the image_processing code
 
 Ben Folkard
-10/10/2025 & 13/10/2025
+10/10/2025 & 13/10/2025-15/10/2025
 """
-
 import image_processing as ip_new
 import image_processing_old as ip_old
-# from test_image_processing import *
+from test_image_processing import FakeVideo
 
+import cv2
 import pytest
 import time
 import numpy as np
@@ -41,7 +41,7 @@ def time_func(func, args, repeat=5):
     "filter_frames_by_optical_flow",
     "find_damaged_pixel_heatmap",
 ])
-def test_equivalence_and_benchmark(func_name, sample_frames, benchmark, tmp_path):
+def test_equivalence_and_benchmark(func_name, sample_frames, benchmark, tmp_path, monkeypatch):
     func_old = getattr(ip_old, func_name)
     func_new = getattr(ip_new, func_name)
 
@@ -66,6 +66,10 @@ def test_equivalence_and_benchmark(func_name, sample_frames, benchmark, tmp_path
             )
         case "load_video_frames":
             args = (tmp_path / "out.mp4",)
+            dummy_frame = np.full((10, 10, 3), 128, dtype=np.uint8)
+            dummy_frames = [dummy_frame for _ in range(10)]
+            monkeypatch.setattr(cv2, "VideoCapture", lambda fn: FakeVideo(dummy_frames))
+
         case "compute_background":
             index = 2
             radius = 1
