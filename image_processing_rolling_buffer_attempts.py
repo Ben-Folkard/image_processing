@@ -19,7 +19,7 @@ import cv2
 import numpy as np
 import requests
 from collections import deque
-# from numba import njit, prange
+from numba import njit  # , prange
 try:
     import matplotlib.pyplot as plt
     import matplotlib.patches as mpatches
@@ -547,7 +547,7 @@ def detect_damaged_pixels(
     return total_counts, cluster_counts, avg_sizes, avg_brightnesses
 
 
-# @njit(parallel=True)
+@njit(parallel=True)
 def get_damaged_pixel_mask(frame, height, width, background):
     """
     finds damaged pixels for a given frame
@@ -716,7 +716,7 @@ def remove_bright_regions(
     return cleaned
 
 
-# @njit(parallel=True)
+@njit(parallel=True)
 def estimate_damaged_pixels_in_bright_areas(
     frames,
     damaged_pixel_masks,
@@ -730,34 +730,29 @@ def estimate_damaged_pixels_in_bright_areas(
         otherwise fail
     """
 
-    num_frames = len(frames)
-    frame_shape = frames[0].shape
-    estimated_damaged_pixel_counts = np.full(num_frames, np.nan,
-                                             dtype=np.float64)  # could just define as a np.empty
+    estimated_damaged_pixel_counts = np.full(len(frames), np.nan, dtype=np.float64)
 
     # preprocess masks
-    # *v alternatively this could all be replaced by:
-    # processed_masks = damaged_pixel_masks[damaged_pixel_masks == np.nan] = np.False_ v*
-    processed_masks = np.zeros((num_frames, frame_shape[0], frame_shape[1]),
-                               dtype=np.bool_)
+    processed_masks = np.where(~np.isnan(damaged_pixel_masks), damaged_pixel_masks, np.False_)
 
-    for i in range(num_frames):
-        if damaged_pixel_masks[i] is not None:
-            processed_masks[i] = damaged_pixel_masks[i]
-    # *^~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~^*
+    """
+    Could do things like this but numba wouldn't parallise as well
+    frames_stack = np.stack(frames)
+    masks_stack = np.stack(masks)
 
-    for i in range(len(frames)):
-        frame = frames[i]
-        mask = processed_masks[i]
+    low_brightness_mask = (frames_stack < brightness_threshold) & ~masks_stack
+    high_brightness_mask = (frames_stack >= brightness_threshold) & ~masks_stack
+    """
 
+    for i, (frame, mask) in enumerate(zip(frames, processed_masks)):
         # identify low and high brightness regions, excluding existing
         #   damaged pixels
         low_brightness_mask = (frame < brightness_threshold) & ~mask
         high_brightness_mask = (frame >= brightness_threshold) & ~mask
 
         # calculate areas
-        low_brightness_area = np.sum(low_brightness_mask)  # low_brightness_mask.sum() exists
-        high_brightness_area = np.sum(high_brightness_mask)  # high_brightness_mask.sum() exists
+        low_brightness_area = low_brightness_mask.sum()
+        high_brightness_area = high_brightness_mask.sum()
 
         if low_brightness_area > 0:
             # density of damaged pixels in low-brightness areas
@@ -776,7 +771,7 @@ def estimate_damaged_pixels_in_bright_areas(
     return estimated_damaged_pixel_counts  # is actually returning estimated_high_brightness_damaged_pixels
 
 
-# @njit(parallel=True)
+@njit(parallel=True)
 def find_bright_area_estimates(
     frames,
     damaged_pixel_masks,
@@ -916,7 +911,7 @@ def visualise_damaged_pixels(
 
     else:
         bright_areas = frame > bright_threshold
-        vis = cv2.cvtColor(frame, cv2.COLOR_GRAY2BGR)  # Already did this in load_video_frames
+        vis = frame  # cv2.cvtColor(frame, cv2.COLOR_GRAY2BGR) (Already did this in load_video_frames)
 
         # overlay clusters in red
         cluster_overlay = np.zeros_like(vis)
