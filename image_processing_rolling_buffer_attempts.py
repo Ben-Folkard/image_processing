@@ -18,6 +18,7 @@ I should go through here and time each thing to see where the bottlenecks are
 import cv2
 import numpy as np
 import requests
+from collections import deque
 # from numba import njit, prange
 try:
     import matplotlib.pyplot as plt
@@ -191,6 +192,35 @@ def compute_background(frames, index, radius):
     neighbours = neighbours[mask]
 
     return _find_background(neighbours)
+
+
+# Developing on the rolling buffer idea,
+# though might try parallesliation options first before integrating this
+class BackgroundEstimator:
+    def __init__(self, buffer_size=30):
+        self.buffer_size = buffer_size
+        self.frames = deque(maxlen=buffer_size)
+        self.sum = None
+        self.sumsq = None
+
+    def update(self, frame):
+        f = frame.astype(np.float32)
+        if self.sum is None:
+            self.sum = np.zeros_like(f)
+            self.sumsq = np.zeros_like(f)
+        self.frames.append(f)
+        self.sum += f
+        self.sumsq += f ** 2
+        if len(self.frames) > self.buffer_size:
+            old = self.frames.popleft()
+            self.sum -= old
+            self.sumsq -= old ** 2
+        n = len(self.frames)
+        mean = self.sum / n
+        std = np.sqrt(self.sumsq / n - mean ** 2)
+        valid = f <= mean + std
+        bg = np.mean(np.stack(self.frames)[valid], axis=0)
+        return bg
 
 
 def _find_background(frames, pixel_std_coeff=1):
