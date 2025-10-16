@@ -176,67 +176,54 @@ def _prepare_settings(params):
     return type('S', (), defaults)
 
 
-def compute_background(frames, index, radius):
-    """
-    estimate background brightness for each pixel of a given frame, based on
-    the mean brightness of that pixel in the frames in a sliding window
-    (providing the pixel is undamaged in those frames)
-    """
-    start = max(0, index - radius)
-    end = min(len(frames), index + radius + 1)
-    neighbours = np.asarray(frames[start:end])
-    center_idx = index - start
-
-    mask = np.ones(len(neighbours), dtype=np.bool_)
-    mask[center_idx] = np.False_
-    neighbours = neighbours[mask]
-
-    return _find_background(neighbours)
-
-
 # Developing on the rolling buffer idea,
 # though might try parallesliation options first before integrating this
 class BackgroundEstimator:
-    def __init__(self, buffer_size=30):
+    def __init__(self, frames, buffer_size=30):
         self.buffer_size = buffer_size
-        self.frames = deque(maxlen=buffer_size)
+        self.frames = deque(frames[1:buffer_size])
         self.sum = None
         self.sumsq = None
 
-    def update(self, frame):
+    def load(self, pixel_std_coeff=1):
+        frames = np.stack(self.frames)
+
+        self.sum = frames.sum(axis=0)
+        self.sumsq = (frames**2).sum(axis=0)
+
+        pixel_means = frames.mean(axis=0)
+        pixel_std = frames.std(axis=0)
+
+        valid = frames <= pixel_means + pixel_std_coeff * pixel_std
+
+        # find background, excluding unusually bright pixels
+        masked = np.where(valid, frames, np.nan)
+        bg = np.nanmean(masked, axis=0)
+
+        if np.isnan(bg).any():
+            bg = np.nan_to_num(bg, nan=frames.mean(axis=0))
+
+        return bg
+
+    def update(self, frame, pixel_std_coeff=1):
         f = frame.astype(np.float32)
-        if self.sum is None:
-            self.sum = np.zeros_like(f)
-            self.sumsq = np.zeros_like(f)
         self.frames.append(f)
+
         self.sum += f
         self.sumsq += f ** 2
+
         if len(self.frames) > self.buffer_size:
             old = self.frames.popleft()
             self.sum -= old
             self.sumsq -= old ** 2
+
         n = len(self.frames)
         mean = self.sum / n
         std = np.sqrt(self.sumsq / n - mean ** 2)
-        valid = f <= mean + std
+
+        valid = f <= mean + pixel_std_coeff * std
         bg = np.mean(np.stack(self.frames)[valid], axis=0)
         return bg
-
-
-def _find_background(frames, pixel_std_coeff=1):
-    pixel_means = frames.mean(axis=0)
-    pixel_std = frames.std(axis=0)
-
-    valid = frames <= pixel_means + pixel_std_coeff * pixel_std
-
-    # find background, excluding unusually bright pixels
-    masked = np.where(valid, frames, np.nan)
-    bg = np.nanmean(masked, axis=0)
-
-    if np.isnan(bg).any():
-        bg = np.nan_to_num(bg, nan=frames.mean(axis=0))
-
-    return bg
 
 
 def _raw_damaged_mask(frame, background):
@@ -484,17 +471,20 @@ def detect_damaged_pixels(
     # find damaged pixel mask for each frame
     raw_masks = []  # *Better just to initially define this as a numpy array*
     # *Optimizing this loop will bring massive performance gains*
+
+    bg_estimator = BackgroundEstimator(frames, settings.sliding_window_radius)
+
     for i, frame in enumerate(frames):
 
         if optical_flows[i] > settings.flow_threshold:
             raw_masks.append(None)
             continue
 
-        background = compute_background(
-            frames,
-            i,
-            settings.sliding_window_radius
-            )
+        if i == 0:
+            background = bg_estimator.load()
+        else:
+            background = bg_estimator.update(frame)
+
         raw_mask = _raw_damaged_mask(frame, background)
         bright_filtered = remove_bright_regions(
             background,
