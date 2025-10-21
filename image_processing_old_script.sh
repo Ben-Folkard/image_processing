@@ -8,7 +8,7 @@
 #SBATCH --mail-type=END,FAIL
 #SBATCH --mail-user=Ben.Folkard@stfc.ac.uk
 
-/home/vol03/scarf1493/myenv/bin/python3 image_processing.py --video_filename 11_01_H_170726081325.avi
+/home/vol03/scarf1493/myenv/bin/python3 image_processing_old.py --video_filename 11_01_H_170726081325.avi
 
 # mailx -s "SLURM job $SLURM_JOB_ID finished on $HOSTNAME" \
 #	-a results/${SLURM_JOB_ID}.log \ 

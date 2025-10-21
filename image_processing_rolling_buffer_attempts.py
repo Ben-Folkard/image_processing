@@ -206,11 +206,10 @@ class BackgroundEstimator:
         return bg
 
     def update(self, frame, pixel_std_coeff=1):
-        f = frame.astype(np.float32)
-        self.frames.append(f)
+        self.frames.append(frame)
 
-        self.sum += f
-        self.sumsq += f ** 2
+        self.sum += frame
+        self.sumsq += frame ** 2
 
         if len(self.frames) > self.buffer_size:
             old = self.frames.popleft()
@@ -221,8 +220,10 @@ class BackgroundEstimator:
         mean = self.sum / n
         std = np.sqrt(self.sumsq / n - mean ** 2)
 
-        valid = f <= mean + pixel_std_coeff * std
-        bg = np.mean(np.stack(self.frames)[valid], axis=0)
+        frames_stack = np.stack(self.frames)
+
+        valid = frames_stack <= mean + pixel_std_coeff * std
+        bg = np.mean(frames_stack[valid], axis=0)
         return bg
 
 
@@ -549,43 +550,6 @@ def detect_damaged_pixels(
 
 @njit(parallel=True)
 def get_damaged_pixel_mask(frame, height, width, background):
-    """
-    finds damaged pixels for a given frame
-    takes background brightness as input, should be an array of brightness
-    values corresponding to each pixel in the frame
-    """
-
-    damaged_pixels = np.zeros_like(frame, dtype=np.bool_)
-    thresholds = np.empty((height, width), dtype=np.float64)
-
-    # *Feels like this loop could be vectorised*
-    # *Though actually running it in parallel might also be a good idea*
-    for row in range(height):
-        for col in range(width):
-
-            # condition 1: pixel brightness should exceed background by a
-            #   threshold scaled with background brightness
-            threshold = max(30, 30 + (background[row, col] / 255) * (255 - 30))
-            thresholds[row, col] = threshold
-
-            if frame[row, col] > threshold:
-                # condition 2: pixel's brightness should exceed mean of its
-                #   neighbours in a 30x30 kernel
-                kernel = frame[max(row - 10, 0): min(row + 20, height),
-                               max(col - 10, 0): min(col + 20, width)]
-                kernel_mean = np.mean(kernel)
-
-                if frame[row, col] > (1 * kernel_mean):
-                    damaged_pixels[row, col] = True
-
-    damaged_pixels_uint8 = damaged_pixels.astype(np.uint8)
-
-    return damaged_pixels_uint8, thresholds
-
-
-"""
-*Should just do something like this (Vectorised version, should be a lot faster)*
-def get_damaged_pixel_mask(frame, height, width, background):
     # condition 1: pixel brightness should exceed background by a
     #   threshold scaled with background brightness
     threshold = np.maximum(30, 30 + (background / 255) * (255 - 30))
@@ -599,7 +563,6 @@ def get_damaged_pixel_mask(frame, height, width, background):
     damaged &= frame > local_mean
 
     return damaged.astype(np.uint8), threshold
-"""
 
 
 def filter_damaged_pixel_clusters(
