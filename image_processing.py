@@ -16,11 +16,13 @@ I should go through here and time each thing to see where the bottlenecks are
 
 # importing libraries
 import cv2
+import os
 import numpy as np
 import requests
 from numba import njit, prange
 from concurrent.futures import ThreadPoolExecutor
 from joblib import Parallel, delayed
+from multiprocessing import Pool, cpu_count
 
 try:
     import matplotlib.pyplot as plt
@@ -30,8 +32,6 @@ except ImportError:
     plt = None
     mpatches = None
 
-
-# including functions
 
 def download_video_from_url(url, filename):
     """
@@ -180,9 +180,11 @@ def _prepare_settings(params):
 
 
 def compute_background(frames, index, radius):
-    # estimate background brightness for each pixel of a given frame, based on
-    # the mean brightness of that pixel in the frames in a sliding window
-    # (providing the pixel is undamaged in those frames)
+    """
+    estimate background brightness for each pixel of a given frame, based on
+    the mean brightness of that pixel in the frames in a sliding window
+    (providing the pixel is undamaged in those frames)
+    """
     start = max(0, index - radius)
     end = min(len(frames), index + radius + 1)
 
@@ -409,8 +411,10 @@ def compute_static_mask(
     returns a boolean mask of pixels damaged for a
         percentage > static_threshold
     """
+    mask_shape = frames[0].shape
+    filled_masks = [(mask if mask is not None else np.zeros(mask_shape, dtype=bool)) for mask in masks]
 
-    mask_stack = np.stack([m.astype(np.uint8) for m in masks], axis=0)
+    mask_stack = np.stack([mask.astype(np.uint8) for mask in filled_masks], axis=0)
     frame_stack = np.stack(frames, axis=0)
 
     heatmap = mask_stack.sum(axis=0)
@@ -894,7 +898,7 @@ def visualise_damaged_pixels(
     """
 
     if not HAS_MATPLOTLIB:
-        print("matplotlib not availabel - skipping"
+        print("matplotlib not available - skipping"
               "damaged pixel visualisation")
 
     else:
@@ -941,7 +945,7 @@ def plot_heatmap(heatmap, title="Damaged Pixel Heatmap"):
     plots heatmap showing damaged pixel distribution over every frame
     """
     if not HAS_MATPLOTLIB:
-        print("matplotlib not availabel - skipping heatmap plot")
+        print("matplotlib not available - skipping heatmap plot")
 
     else:
 
@@ -957,7 +961,7 @@ def plot_damaged_pixels(damaged_pixel_counts):
     plots the count of damaged pixels across frames
     """
     if not HAS_MATPLOTLIB:
-        print("matplotlib not availabel - skipping damaged pixel output graph")
+        print("matplotlib not available - skipping damaged pixel output graph")
 
     else:
         plt.figure(figsize=(10, 5))
@@ -974,6 +978,13 @@ def chunked_nanmean(array, step):
     return [np.nanmean(array[i:i+step]) for i in range(0, len(array), step)]
 
 
+def process_chunk(args):
+    """Worker function for parallel processing of video chunks"""
+    filename, start, end = args
+    chunk = load_video_frames(filename, frames_start=start, frames_end=end)
+    return detect_damaged_pixels(chunk, plot=False)
+
+
 def main(
     video_filename: str,
     average_time: float = 1.0,
@@ -988,6 +999,7 @@ def main(
     - video_filename: path to the AVI file
     - average_time: how many seconds to average over in the final summaries
     - max_chunks: if not None, only process that many chunks (for quick tests)
+    - STEP_SIZE: The number of steps each chunk is split into
     """
     # open video
     cap = cv2.VideoCapture(video_filename)
@@ -1002,38 +1014,28 @@ def main(
 
     # apply user defined limit of how many video chunks to process
     if max_chunks is not None:
-        monolith_frames_list = monolith_frames_list[:max_chunks]
+        monolith_frames_list = monolith_frames_list[:max_chunks+1]
 
-    # storage for each chunk’s raw results
-    frames_count = []
-    all_clusters = []
-    all_sizes = []
-    all_brightness = []
+    chunk_args = [
+        (video_filename, monolith_frames_list[i], monolith_frames_list[i + 1])
+        for i in range(len(monolith_frames_list)-1)
+    ]
+
+    num_workers = min(len(chunk_args), cpu_count())
+    print(f"Using {num_workers} worker processes")
+
+    with Pool(processes=num_workers) as pool:
+        results = pool.map(process_chunk, chunk_args)
+
+    # unpack & flatten results
+    counts, clusters, sizes, brightness = zip(*results)
+    counts = np.concatenate(counts)
+    clusters = np.concatenate(clusters)
+    sizes = np.concatenate(sizes)
+    brightness = np.concatenate(brightness)
 
     # how many frames per averaging window
     step = int(round(FPS * average_time))
-
-    # loop over video chunks and used damaged pixel detector
-    for idx in range(len(monolith_frames_list)):
-        start = monolith_frames_list[idx]
-        end = monolith_frames_list[idx + 1]
-        print(f"processing chunk {idx}: frames {start}–{end}")
-        chunk = load_video_frames(video_filename,
-                                  frames_start=start,
-                                  frames_end=end)
-        counts, clusters, sizes, brightness = detect_damaged_pixels(
-            chunk, plot=False)
-
-        frames_count.append(counts)
-        all_clusters.append(clusters)
-        all_sizes.append(sizes)
-        all_brightness.append(brightness)
-
-    # flatten results
-    counts = np.concatenate(frames_count)
-    clusters = np.concatenate(all_clusters)
-    sizes = np.concatenate(all_sizes)
-    brightness = np.concatenate(all_brightness)
 
     averages_counts = chunked_nanmean(counts, step)
 
@@ -1045,24 +1047,44 @@ def main(
         "averages_counts": averages_counts,
         "averages_clusters": chunked_nanmean(clusters, step),
         "averages_size": chunked_nanmean(sizes, step),
-        "brightness": chunked_nanmean(brightness, step),
+        "averages_brightness": chunked_nanmean(brightness, step),
         "times": times
     }
 
 
 if __name__ == "__main__":
+    # Default number of threads is only 2 (so upping it significantly)
+    num_threads = int(os.environ.get("SLURM_CPUS_PER_TASK", os.cpu_count()))
+    num_threads_used = num_threads // 2
+    cv2.setNumThreads(num_threads_used)
+    print(f"Using {num_threads_used} threads")
+
     import argparse
     parser = argparse.ArgumentParser()
-    parser.add_argument("-vf", "--video_filename", help="Specify a .avi file to be processed")
+    parser.add_argument("-vf", "--video_filename", help="Path to the AVI file")
+    parser.add_argument("-at", "--average_time", help="How many seconds to average over in the final summaries")
+    parser.add_argument("-mc", "--max_chunks", help="If not None, only process that many chunks (for quick tests)")
+    parser.add_argument("-ss", "--step_size", help="The number of steps each chunk is split into")
     args = parser.parse_args()
 
-    if args.video_filename:
-        VIDEO_FILENAME = args.video_filename
+    VIDEO_FILENAME = args.video_filename if args.video_filename else "11_01_H_170726081325.avi"
+    average_time = float(args.average_time) if args.average_time else 1.0
+    if args.max_chunks:
+        if args.max_chunks.lower() == "none":
+            max_chunks = None
+        else:
+            max_chunks = int(args.max_chunks)
     else:
-        VIDEO_FILENAME = "11_01_H_170726081325.avi"
+        max_chunks = 2
+    STEP_SIZE = int(args.step_size) if args.step_size else 1000
 
     # for a quick test on only 2 chunks:
-    results = main(VIDEO_FILENAME, average_time=1.0, max_chunks=2)
+    results = main(
+                   VIDEO_FILENAME,
+                   average_time=average_time,
+                   max_chunks=max_chunks,
+                   STEP_SIZE=STEP_SIZE,
+    )
 
     print("counts:", results["averages_counts"])
     print("clusters:", results["averages_clusters"])
