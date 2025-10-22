@@ -19,7 +19,7 @@ import cv2
 import os
 import numpy as np
 import requests
-from numba import njit, prange
+from numba import prange  # , njit
 from concurrent.futures import ThreadPoolExecutor
 from joblib import Parallel, delayed
 from multiprocessing import Pool, cpu_count
@@ -179,12 +179,9 @@ def _prepare_settings(params):
     return type('S', (), defaults)
 
 
+"""
+# Old non-rolling background version
 def compute_background(frames, index, radius):
-    """
-    estimate background brightness for each pixel of a given frame, based on
-    the mean brightness of that pixel in the frames in a sliding window
-    (providing the pixel is undamaged in those frames)
-    """
     start = max(0, index - radius)
     end = min(len(frames), index + radius + 1)
 
@@ -201,11 +198,6 @@ def compute_background(frames, index, radius):
 
 @njit(parallel=True, fastmath=True)
 def _find_background(frames, pixel_std_coeff=1.0):
-    """
-    Numba-accelerated version of the NumPy background estimator.
-    Matches np.nanmean(np.where(frames <= mean + std, frames, nan), axis=0)
-    with NaN fallback handling.
-    """
     n, h, w = frames.shape
     pixel_means = np.zeros((h, w), np.float32)
     pixel_stds = np.zeros((h, w), np.float32)
@@ -242,13 +234,55 @@ def _find_background(frames, pixel_std_coeff=1.0):
             if c > 0:
                 bg[i, j] = s / c
             else:
-                # faithfully match np.nan_to_num(nanmean(masked)) fallback
                 s_all = 0.0
                 for k in range(n):
                     s_all += frames[k, i, j]
                 bg[i, j] = s_all / n
 
     return bg
+"""
+
+
+def compute_background(frames, radius, pixel_std_coeff=1.0):
+    """
+    estimate background brightness for each pixel of a given frame, based on
+    the mean brightness of that pixel in the frames in a sliding window
+    (providing the pixel is undamaged in those frames), implementing a
+    rolling buffer
+    """
+    frames = frames.astype(np.float32)
+    n, h, w = frames.shape
+    window = 2 * radius + 1
+
+    # Pad with edge frames so boundaries are well defined
+    padded = np.pad(frames, ((radius, radius), (0, 0), (0, 0)), mode="edge")
+
+    # Precompute initial sums for the first window
+    rolling_sum = np.sum(padded[:window], axis=0, dtype=np.float32)
+    rolling_sq_sum = np.sum(padded[:window] ** 2, axis=0, dtype=np.float32)
+
+    backgrounds = np.zeros_like(frames, dtype=np.float32)
+
+    for i in range(n):
+        # Compute mean and std for current window
+        mean = rolling_sum / window
+        std = np.sqrt(np.maximum(rolling_sq_sum / window - mean**2, 0.0))
+
+        # Exclude outliers (like _find_background())
+        thr = mean + pixel_std_coeff * std
+        window_frames = padded[i:i + window]
+        masked = np.where(window_frames <= thr, window_frames, np.nan)
+        bg = np.nanmean(masked, axis=0)
+        bg = np.nan_to_num(bg, nan=mean)  # fallback if all were NaN
+
+        backgrounds[i] = bg
+
+        # Roll window forward (remove oldest, add newest)
+        if i < n - 1:
+            rolling_sum += padded[i + window] - padded[i]
+            rolling_sq_sum += padded[i + window] ** 2 - padded[i] ** 2
+
+    return backgrounds
 
 
 def _raw_damaged_mask(frame, background):
@@ -512,16 +546,17 @@ def detect_damaged_pixels(
 
     # find damaged pixel mask for each frame
     raw_masks = np.full(len(frames), None, dtype=object)
+
+    backgrounds = compute_background(
+                                     frames,
+                                     radius=settings.sliding_window_radius,
+    )
+
     for i, frame in enumerate(frames):
         if optical_flows[i] <= settings.flow_threshold:
-            background = compute_background(
-                frames,
-                i,
-                settings.sliding_window_radius
-                )
-            raw_mask = _raw_damaged_mask(frame, background)
+            raw_mask = _raw_damaged_mask(frame, backgrounds[i])
             bright_filtered = remove_bright_regions(
-                background,
+                backgrounds[i],
                 settings.brightness_threshold,
                 raw_mask,
                 settings.max_cluster_size

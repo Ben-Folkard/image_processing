@@ -33,7 +33,7 @@ def time_func(func, args, repeat=5):
 
 
 @pytest.mark.parametrize("func_name", [
-    "_find_background",
+    # "_find_background",
     "compute_static_mask",
     "load_video_frames",
     # "compute_background",
@@ -222,14 +222,18 @@ def test_equivalence_and_benchmark(func_name, sample_frames, benchmark, tmp_path
                 max_cluster_size = 10
                 number_of_plots = 1
 
-            def set_monkeypatches(monkeypatch, ip):
+            def set_monkeypatches(monkeypatch, ip, version="old"):
                 monkeypatch.setattr(ip, '_prepare_settings', lambda params: Settings)
                 monkeypatch.setattr(ip, 'compute_optical_flow_metric', lambda fs:
                                     [0.0, 10.0])
 
                 # raw masks: first frame processed, second skipped
-                monkeypatch.setattr(ip, 'compute_background', lambda frames, i, radius:
-                                    np.zeros((1, 1)))
+                if version == "old":
+                    monkeypatch.setattr(ip, 'compute_background', lambda frames, i, radius:
+                                        np.zeros((1, 1)))
+                else:
+                    monkeypatch.setattr(ip, 'compute_background', lambda frames, radius:
+                                        np.array([np.zeros((1, 1)), np.zeros((1, 1))]))
                 monkeypatch.setattr(ip, '_raw_damaged_mask', lambda frames, brightness:
                                     np.array([[True]]))
                 monkeypatch.setattr(ip, 'remove_bright_regions', lambda background,
@@ -261,8 +265,8 @@ def test_equivalence_and_benchmark(func_name, sample_frames, benchmark, tmp_path
 
                 return monkeypatch
 
-            monkeypatch = set_monkeypatches(monkeypatch, ip_old)
-            monkeypatch = set_monkeypatches(monkeypatch, ip_new)
+            monkeypatch = set_monkeypatches(monkeypatch, ip_old, version="old")
+            monkeypatch = set_monkeypatches(monkeypatch, ip_new, version="new")
 
             args = (frames, plot)
         case "filter_consecutive_pixels":

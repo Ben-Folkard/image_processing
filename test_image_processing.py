@@ -206,15 +206,14 @@ def test_prepare_settings_override():
     assert Settings.consecutive_threshold == 2
 
 
+"""
 def test_find_background_basic():
-    """
-    create 3 frames of shape (2, 2)
+    # create 3 frames of shape (2, 2)
 
-    brightness values:
-    f0 = [[1, 5], [5, 1]]
-    f1 = [[2, 6], [6, 2]]
-    f2 = [[200, 200], [200, 200]]
-    """
+    # brightness values:
+    # f0 = [[1, 5], [5, 1]]
+    # f1 = [[2, 6], [6, 2]]
+    # f2 = [[200, 200], [200, 200]]
 
     frames = np.array([
         [[1, 5], [5, 1]],
@@ -232,22 +231,21 @@ def test_find_background_basic():
 
 
 def test_find_background_bright():
-    """
-    tests the implementation of find_background when all frames must be
-    excluded
-    """
+    # tests the implementation of find_background when all frames must be
+    # excluded
 
     frames = np.full((3, 2, 2), 255)
     bg = ip._find_background(frames)
 
     assert np.all(bg == 255)
+"""
 
 
+"""
+# Old
 def test_compute_background_calls(monkeypatch):
-    """
-    tests that the correct neighbour frames are sliced before calling
-    find_background
-    """
+    # tests that the correct neighbour frames are sliced before calling
+    # find_background
 
     frames = [np.full((4, 4), i, dtype=float) for i in range(5)]
     captures = {}
@@ -266,6 +264,31 @@ def test_compute_background_calls(monkeypatch):
     assert (captures['arg'][1] == frames[3]).all()
     assert np.all(bg == 0)
     print('tests passed')
+"""
+
+
+def test_compute_background():
+
+    frames = np.array([
+        [[1, 5], [5, 1]],
+        [[2, 6], [6, 2]],
+        [[200, 200], [200, 200]],
+        ], dtype=float)
+
+    bg = ip.compute_background(frames, radius=1)
+
+    expected_output = np.array([
+                                [[1.0, 5.0],
+                                 [5.0, 1.0]],
+
+                                [[1.5, 5.5],
+                                 [5.5, 1.5]],
+
+                                [[134.0, 135.33333],
+                                 [135.33333, 134.0]]
+    ], dtype=np.float32)
+
+    assert np.allclose(bg, expected_output)
 
 
 def test_raw_damaged_mask(monkeypatch):
@@ -458,8 +481,8 @@ def test_detect_damaged_pixels_pipeline(monkeypatch):
                         [0.0, 10.0])
 
     # raw masks: first frame processed, second skipped
-    monkeypatch.setattr(ip, 'compute_background', lambda frames, i, radius:
-                        np.zeros((1, 1)))
+    monkeypatch.setattr(ip, 'compute_background', lambda frames, radius:
+                        np.array([np.zeros((1, 1)), np.zeros((1, 1))]))
     monkeypatch.setattr(ip, '_raw_damaged_mask', lambda frames, brightness:
                         np.array([[True]]))
     monkeypatch.setattr(ip, 'remove_bright_regions', lambda background,
