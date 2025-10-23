@@ -19,7 +19,7 @@ import cv2
 import os
 import numpy as np
 import requests
-# from numba import njit, prange
+from numba import prange  # , njit
 from concurrent.futures import ThreadPoolExecutor
 from joblib import Parallel, delayed
 from multiprocessing import Pool, cpu_count
@@ -31,10 +31,6 @@ except ImportError:
     HAS_MATPLOTLIB = False
     plt = None
     mpatches = None
-
-DTYPE_IMAGE = np.uint8
-DTYPE_COMPUTE = np.float32
-DTYPE_MASK = np.bool_
 
 
 def download_video_from_url(url, filename):
@@ -105,7 +101,7 @@ def load_video_frames(filename, frames_start=None, frames_end=None, grayscale=Tr
     n_frames = max(0, end - start)
 
     cap.set(cv2.CAP_PROP_POS_FRAMES, start)
-    frames = np.empty((n_frames, height, width), dtype=DTYPE_IMAGE)
+    frames = np.empty((n_frames, height, width), dtype=np.uint8)
 
     i = 0
     while i < n_frames:
@@ -177,7 +173,6 @@ def _prepare_settings(params):
         'min_circularity': 0.1,
         'sliding_window_radius': 3,
         'number_of_plots': 20,
-        'kernel': cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3, 3))
     }
     if params:
         defaults.update(params)
@@ -190,10 +185,10 @@ def compute_background(frames, index, radius):
     start = max(0, index - radius)
     end = min(len(frames), index + radius + 1)
 
-    neighbours = np.asarray(frames[start:end], dtype=DTYPE_COMPUTE)
+    neighbours = np.asarray(frames[start:end], dtype=np.float32)
     center_idx = index - start
 
-    mask = np.ones(len(neighbours), dtype=DTYPE_MASK)
+    mask = np.ones(len(neighbours), dtype=bool)
     mask[center_idx] = False
 
     neighbours = neighbours[mask]
@@ -265,10 +260,10 @@ def compute_background(frames, radius, pixel_std_coeff=1.0):
     padded = np.pad(frames, ((radius, radius), (0, 0), (0, 0)), mode="edge")
 
     # Precompute initial sums for the first window
-    rolling_sum = np.sum(padded[:window], axis=0, dtype=DTYPE_COMPUTE)
-    rolling_sq_sum = np.sum(padded[:window] ** 2, axis=0, dtype=DTYPE_COMPUTE)
+    rolling_sum = np.sum(padded[:window], axis=0, dtype=np.float32)
+    rolling_sq_sum = np.sum(padded[:window] ** 2, axis=0, dtype=np.float32)
 
-    backgrounds = np.zeros_like(frames, dtype=DTYPE_COMPUTE)
+    backgrounds = np.zeros_like(frames, dtype=np.float32)
 
     for i in range(n):
         # Compute mean and std for current window
@@ -297,7 +292,12 @@ def _raw_damaged_mask(frame, background):
     returns first pass mask of potentially damaged pixels
     """
     # *Seems a little reduntant returning threasholds if you're not going to use it*
-    mask, _ = get_damaged_pixel_mask(frame, background)
+    mask, _ = get_damaged_pixel_mask(
+        frame,
+        frame.shape[0],
+        frame.shape[1],
+        background
+    )
 
     return mask.astype(bool)
 
@@ -311,17 +311,25 @@ def compute_persistent_mask(masks, consecutive_threshold):
     current_status = np.zeros((height, width), np.int32)
     longest_flag = np.zeros_like(current_status)
 
-    for mask in masks:
-        current_status[mask] += 1
-        current_status[~mask] = 0
+    for i in prange(len(masks)):
+        mask = masks[i]
+        if mask is None:
+            current_status[:] = 0
+        else:
+            current_status[mask] += 1
+            current_status[~mask] = 0
 
         longest_flag = np.maximum(longest_flag, current_status)
 
     return longest_flag >= consecutive_threshold
 
 
-"""
 def filter_consecutive_pixels(masks, persistent):
+    """
+    filters out pixels which have been flagged as damaged for multiple
+    consecutive frames
+    """
+
     filtered_masks = []
     counts = []
 
@@ -335,39 +343,34 @@ def filter_consecutive_pixels(masks, persistent):
             counts.append(int(filtered.sum()))
 
     return filtered_masks, counts
+
+
 """
-
-
+# Until general code restructure, this will have to remain like this
 def filter_consecutive_pixels(masks, persistent):
-    """
-    filters out pixels which have been flagged as damaged for multiple
-    consecutive frames
-    """
     filtered_masks = np.full_like(masks, None, dtype=object)
-    counts = np.full(len(masks), np.nan, dtype=DTYPE_COMPUTE)
+    counts = np.full(len(masks), np.nan, dtype=np.float32)
 
     inv_persistent = ~persistent
 
     for i, mask in enumerate(masks):
-        filtered = np.logical_and(mask, inv_persistent)
-        filtered_masks[i] = filtered
-        counts[i] = filtered.sum()
+        if mask is not None:
+            filtered = np.logical_and(mask, inv_persistent)
+            filtered_masks[i] = filtered
+            counts[i] = filtered.sum()
 
     return filtered_masks, counts
+"""
 
 
 # Going to have to monitor, as shows significant slow down for small tests
 def compute_cluster_stats(frames, masks, flows, settings, n_jobs=-1):
     def process_single(frame, mask, flow):
-        if np.all(mask is False) or flow > settings.flow_threshold:
+        if mask is None or flow > settings.flow_threshold:
             return 0.0, 0.0, 0.0
         _, count, size, bright = filter_damaged_pixel_clusters(
-            frame,
-            mask,
-            settings.min_cluster_size,
-            settings.max_cluster_size,
-            settings.min_circularity,
-            settings.kernel,
+            frame, mask, settings.min_cluster_size,
+            settings.max_cluster_size, settings.min_circularity
         )
         return count, size, bright
 
@@ -389,10 +392,10 @@ def _get_final_count(masks, bright_estimates):
     # Possible bug: kept in the original possible bug where
     # base still contains nans whilst estimate doesn't
     counts = np.array([
-       np.sum(mask) +
+       (np.sum(mask) if mask is not None else np.nan) +
        (estimate if not np.isnan(estimate) else 0)
        for mask, estimate in zip(masks, bright_estimates)
-    ], dtype=DTYPE_COMPUTE)
+    ], dtype=float)
 
     return counts
 
@@ -403,10 +406,10 @@ def _get_final_count(masks, bright_estimates):
     counts = []
 
     for mask, estimate in zip(masks, bright_estimates):
-        base = int(mask.sum())
+        base = int(mask.sum()) if mask is not None else np.nan
         counts.append(base + (estimate if not np.isnan(estimate) else 0))
 
-    return np.array(counts, dtype=DTYPE_COMPUTE)
+    return np.array(counts, dtype=float)
 """
 
 
@@ -427,7 +430,7 @@ def _generate_plots(
     plot_damaged_pixels(counts)
     heatmap = find_damaged_pixel_heatmap(
         frames,
-        [m.astype(np.uint8) for m in masks]
+        [m.astype(np.uint8) for m in masks if m is not None]
     )
     plot_heatmap(heatmap)
 
@@ -444,32 +447,80 @@ def compute_static_mask(
     returns a boolean mask of pixels damaged for a
         percentage > static_threshold
     """
-    frame_stack = np.asarray(frames, dtype=DTYPE_IMAGE)
-    mask_stack = masks.astype(DTYPE_IMAGE)
+    mask_shape = frames[0].shape
+    filled_masks = [(mask if mask is not None else np.zeros(mask_shape, dtype=bool)) for mask in masks]
+
+    mask_stack = np.stack([mask.astype(np.uint8) for mask in filled_masks], axis=0)
+    frame_stack = np.stack(frames, axis=0)
 
     heatmap = mask_stack.sum(axis=0)
-    bright = (frame_stack > brightness_threshold) & (~mask_stack.astype(bool))
+    bright = (frame_stack > brightness_threshold) & \
+        (~mask_stack.astype(bool))
     valid_counts = (~bright).sum(axis=0)
 
-    with np.errstate(invalid='ignore'):
-        percentage_map = np.where(
-            valid_counts > min_valid_frames,
-            (heatmap / valid_counts) * 100,
-            0.0,
-        )
+    percentage_map = np.zeros_like(heatmap, dtype=float)
+    good = valid_counts > min_valid_frames
+    percentage_map[good] = (heatmap[good] / valid_counts[good]) * 100
+
     return percentage_map > static_threshold
 
 
-def apply_static_suppression(masks, persistent, static_mask, calc_counts=False):
+def apply_static_suppression(masks, persistent, static_mask):
+    bad = persistent | static_mask
+    final_masks = []
+    counts = []
+
+    for m in masks:
+        if m is None:
+            final_masks.append(None)
+            counts.append(np.nan)
+        else:
+            final_mask = m & ~bad
+            final_masks.append(final_mask)
+            counts.append(int(final_mask.sum()))
+    return final_masks, np.array(counts, dtype=float)
+
+
+""" (Also somehow slower)
+def apply_static_suppression(masks, persistent, static_mask):
+    bad = persistent | static_mask
+    final_masks = []
+    counts = np.full(len(masks), np.nan, dtype=np.float64)
+
+    for i, mask in enumerate(masks):
+        if mask is None:
+            final_masks.append(None)
+        else:
+            final_mask = mask & ~bad
+            final_masks.append(final_mask)
+            counts[i] = int(final_mask.sum())
+    return final_masks, counts
+"""
+
+""" (Ended up being slower)
+def apply_static_suppression(masks, persistent, static_mask):
     bad = np.logical_or(persistent, static_mask)
-    final_masks = np.logical_and(masks, ~bad)
-    if calc_counts:
-        counts = np.zeros(final_masks.shape[0], dtype=DTYPE_COMPUTE)
-        for i, m in enumerate(final_masks):
-            counts[i] = m.sum()
-        return final_masks, counts
-    else:
-        return final_masks, None
+
+    # Separate valid masks
+    valid_indices = [i for i, m in enumerate(masks) if m is not None]
+    if not valid_indices:
+        return masks, np.full(len(masks), np.nan)
+
+    # Stack only valid ones to work in batch
+    stacked = np.stack([masks[i] for i in valid_indices])
+    suppressed = np.logical_and(stacked, ~bad)  # vectorized suppression
+
+    # Replace back into original list
+    final_masks = list(masks)
+    for idx, m in zip(valid_indices, suppressed):
+        final_masks[idx] = m
+
+    # Compute counts (vectorized where possible)
+    counts = np.full(len(masks), np.nan)
+    counts[valid_indices] = suppressed.sum(axis=(1, 2))
+
+    return final_masks, counts
+"""
 
 
 def detect_damaged_pixels(
@@ -496,8 +547,7 @@ def detect_damaged_pixels(
     optical_flows = compute_optical_flow_metric(frames)
 
     # find damaged pixel mask for each frame
-    # raw_masks = np.full(len(frames), None, dtype=object)
-    raw_masks = np.zeros_like(frames, dtype=DTYPE_MASK)
+    raw_masks = np.full(len(frames), None, dtype=object)
 
     backgrounds = compute_background(
                                      frames,
@@ -568,7 +618,7 @@ def detect_damaged_pixels(
     return total_counts, cluster_counts, avg_sizes, avg_brightnesses
 
 
-def get_damaged_pixel_mask(frame, background):
+def get_damaged_pixel_mask(frame, height, width, background):
     # condition 1: pixel brightness should exceed background by a
     #   threshold scaled with background brightness
     threshold = np.maximum(30, 30 + (background / 255) * (255 - 30))
@@ -590,7 +640,6 @@ def filter_damaged_pixel_clusters(
         min_cluster_size,
         max_cluster_size,
         min_circularity,
-        kernel,
         circularity_size_threshold=10):
     """
     filters large groups of damaged pixels from the mask
@@ -602,14 +651,14 @@ def filter_damaged_pixel_clusters(
     closed_mask = cv2.morphologyEx(
                                    damaged_pixel_mask.astype(np.uint8),
                                    cv2.MORPH_CLOSE,
-                                   kernel,
+                                   cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3, 3)),
     )
 
     # isolate groups of damaged pixels
     num_labels, labels, stats, _ = cv2.connectedComponentsWithStats(closed_mask, connectivity=8)
 
     # prepare outputs
-    cleaned_mask = np.zeros_like(damaged_pixel_mask, dtype=DTYPE_MASK)
+    cleaned_mask = np.zeros_like(damaged_pixel_mask, dtype=bool)
     areas = stats[1:, cv2.CC_STAT_AREA]
 
     valid_labels = np.flatnonzero((areas >= min_cluster_size) & (areas <= max_cluster_size)) + 1
@@ -622,7 +671,7 @@ def filter_damaged_pixel_clusters(
     # Only compute contours for labels above threshold
     large_labels = [label for label in valid_labels if stats[label, cv2.CC_STAT_AREA] >= circularity_size_threshold]
     if large_labels:
-        mask_tmp = np.zeros_like(closed_mask, dtype=DTYPE_IMAGE)
+        mask_tmp = np.zeros_like(closed_mask, dtype=np.uint8)
         for label in large_labels:
             mask_tmp[:] = 0
             mask_tmp[labels == label] = 255
@@ -683,7 +732,7 @@ def remove_bright_regions(
         bright_background_mask, connectivity=8)
 
     # create a mask for large bright regions
-    remove = np.zeros_like(bright_background_mask, dtype=DTYPE_MASK)
+    remove = np.zeros_like(bright_background_mask, dtype=np.bool_)
 
     for label in range(1, num_labels):
         if stats[label, cv2.CC_STAT_AREA] >= max_cluster_size:
@@ -693,7 +742,7 @@ def remove_bright_regions(
     num_labels2, labels2, stats2, _ = cv2.connectedComponentsWithStats(
         damaged_pixel_mask_uint8, connectivity=8)
 
-    cleaned = np.zeros_like(filtered_damaged_pixels, dtype=DTYPE_MASK)
+    cleaned = np.zeros_like(filtered_damaged_pixels, dtype=bool)
     for lbl in range(1, num_labels2):
         comp = (labels2 == lbl)
         if np.any(comp & remove):
@@ -717,11 +766,19 @@ def estimate_damaged_pixels_in_bright_areas(
     """
 
     num_frames = len(frames)
-    estimated_damaged_pixel_counts = np.full(num_frames, np.nan, dtype=DTYPE_COMPUTE)  # could just define as a np.empty
+    frame_shape = frames[0].shape
+    estimated_damaged_pixel_counts = np.full(num_frames, np.nan, dtype=np.float64)  # could just define as a np.empty
+
+    # preprocess masks
+    processed_masks = np.zeros((num_frames, *frame_shape), dtype=np.bool_)
+
+    for i, mask in enumerate(damaged_pixel_masks):
+        if mask is not None:
+            processed_masks[i] = mask
 
     for i in range(len(frames)):
         frame = frames[i]
-        mask = damaged_pixel_masks[i]
+        mask = processed_masks[i]
 
         # identify low and high brightness regions, excluding existing
         #   damaged pixels
@@ -759,17 +816,18 @@ def find_bright_area_estimates(
         estimate_damaged_pixels_in_bright_areas()
     """
 
-    bright_area_estimates = np.full(len(frames), np.nan, dtype=DTYPE_COMPUTE)
+    bright_area_estimates = np.full(len(frames), np.nan, dtype=np.float64)
 
     estimate = estimate_damaged_pixels_in_bright_areas(frames, damaged_pixel_masks)
 
     for i, (frame, mask) in enumerate(zip(frames, damaged_pixel_masks)):
-        high_brightness_mask = (frame > brightness_threshold) & ~mask
+        if mask is not None:
+            high_brightness_mask = (frame > brightness_threshold) & ~mask
 
-        if high_brightness_mask.sum() > 0:
-            bright_area_estimates[i] = estimate[i]
-        else:
-            bright_area_estimates[i] = np.nan
+            if high_brightness_mask.sum() > 0:
+                bright_area_estimates[i] = estimate[i]
+            else:
+                bright_area_estimates[i] = np.nan
 
     return bright_area_estimates
 
