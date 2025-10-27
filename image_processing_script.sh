@@ -15,6 +15,15 @@ step_size=1000
 plot="False"
 show_plots="False"
 save_plots="False"
+consecutive_threshold=2
+brightness_threshold=170
+flow_threshold=2.0
+static_threshold=50
+min_cluster_size=5
+max_cluster_size=20
+min_circularity=0.1
+sliding_window_radius=3
+number_of_plots=20
 
 if [ -n "$SLURM_JOB_ID" ]; then
 	output_folder="results/job_${SLURM_JOB_ID}"
@@ -43,6 +52,24 @@ while [[ "$#" -gt 0 ]]; do
 		-svp) save_plots="$2"; shift ;;
 		--output_folder) output_folder="$2"; shift ;;
 		-of) output_folder="$2"; shift ;;
+		--consecutive_threshold) consecutive_threshold="$2"; shift ;;
+		-ct) consecutive_threshold="$2"; shift ;;
+		--brightness_threshold) brightness_threshold="$2"; shift ;;
+		-bt) brightness_threshold="$2"; shift ;;
+		--flow_threshold) flow_threshold="$2"; shift ;;
+		-ft) flow_threshold="$2"; shift ;;
+		--static_threshold) static_threshold="$2"; shift ;;
+		-st) static_threshold="$2"; shift ;;
+		--min_cluster_size) min_cluster_size="$2"; shift ;;
+		-mncs) min_cluster_size="$2"; shift ;;
+		--max_cluster_size) max_cluster_size="$2"; shift ;;
+		-mxcs) max_cluster_size="$2"; shift ;;
+		--min_circularity) min_circularity="$2"; shift ;;
+		-mnc) min_circularity="$2"; shift ;;
+		--sliding_window_radius) sliding_window_radius="$2"; shift ;;
+		-swr) sliding_window_radius="$2"; shift ;;
+		--number_of_plots) number_of_plots="$2"; shift ;;
+		-np) number_of_plots="$2"; shift ;;
 		*) echo "Unknown parameter passed: $1"; exit 1;;
 	esac
 	shift
@@ -61,7 +88,7 @@ echo "    save_plots = $save_plots"
 echo "    output_folder = $output_folder"
 
 
-/home/vol03/scarf1493/myenv/bin/python3 "$filename" --video_filename "$video_filename" --average_time "$average_time" --max_chunks "$max_chunks" --step_size "$step_size" --plot "$plot" --show_plots "$show_plots" --save_plots "$save_plots" --output_folder "$output_folder"
+/home/vol03/scarf1493/myenv/bin/python3 "$filename" --video_filename "$video_filename" --average_time "$average_time" --max_chunks "$max_chunks" --step_size "$step_size" --plot "$plot" --show_plots "$show_plots" --save_plots "$save_plots" --output_folder "$output_folder" --consecutive_threshold "$consecutive_threshold" --brightness_threshold "$brightness_threshold" --flow_threshold "$flow_threshold" --static_threshold "$static_threshold" --min_cluster_size "$min_cluster_size" --max_cluster_size "$max_cluster_size" --min_circularity "$min_circularity" --sliding_window_radius "$sliding_window_radius" --number_of_plots "$number_of_plots"
 
 if [ -n "$SLURM_JOB_ID" ]; then
 	mv "results/${SLURM_JOB_ID}.log" "$output_folder"
