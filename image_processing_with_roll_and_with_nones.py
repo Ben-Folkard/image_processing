@@ -212,7 +212,7 @@ def compute_background(frames, radius, pixel_std_coeff=1.0):
 
         # Updating rolling window:
         # (Only neighbours are computed)
-        central_frame = frames[i]
+        central_frame = frames[i] if (start > 0) else frames[radius]
         rolling_sum -= central_frame
         rolling_sq_sum -= central_frame**2
         # (The ends move if required)
