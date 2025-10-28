@@ -184,72 +184,6 @@ def _prepare_settings(params):
     return type('S', (), defaults)
 
 
-"""
-# Old non-rolling background version
-def compute_background(frames, index, radius):
-    start = max(0, index - radius)
-    end = min(len(frames), index + radius + 1)
-
-    neighbours = np.asarray(frames[start:end], dtype=np.float32)
-    center_idx = index - start
-
-    mask = np.ones(len(neighbours), dtype=bool)
-    mask[center_idx] = False
-
-    neighbours = neighbours[mask]
-
-    return _find_background(neighbours)
-
-
-@njit(parallel=True, fastmath=True)
-def _find_background(frames, pixel_std_coeff=1.0):
-    n, h, w = frames.shape
-    pixel_means = np.zeros((h, w), np.float32)
-    pixel_stds = np.zeros((h, w), np.float32)
-    bg = np.zeros((h, w), np.float32)
-
-    # Compute mean
-    for i in prange(h):
-        for j in range(w):
-            s = 0.0
-            for k in range(n):
-                s += frames[k, i, j]
-            pixel_means[i, j] = s / n
-
-    # Compute std
-    for i in prange(h):
-        for j in range(w):
-            s = 0.0
-            for k in range(n):
-                diff = frames[k, i, j] - pixel_means[i, j]
-                s += diff * diff
-            pixel_stds[i, j] = (s / n) ** 0.5
-
-    # Compute background excluding outliers
-    for i in prange(h):
-        for j in range(w):
-            thr = pixel_means[i, j] + pixel_std_coeff * pixel_stds[i, j]
-            s = 0.0
-            c = 0
-            for k in range(n):
-                val = frames[k, i, j]
-                if val <= thr:
-                    s += val
-                    c += 1
-            if c > 0:
-                bg[i, j] = s / c
-            else:
-                s_all = 0.0
-                for k in range(n):
-                    s_all += frames[k, i, j]
-                bg[i, j] = s_all / n
-
-    return bg
-"""
-
-
-# Does behave differently to how it did before, will have to compare outputted results
-# (It now pads out each end with duplicates of the edges)
 def compute_background(frames, radius, pixel_std_coeff=1.0):
     """
     estimate background brightness for each pixel of a given frame, based on
@@ -261,33 +195,40 @@ def compute_background(frames, radius, pixel_std_coeff=1.0):
     n, h, w = frames.shape
     window = 2 * radius + 1
 
-    # Pad with edge frames so boundaries are well defined
-    padded = np.pad(frames, ((radius, radius), (0, 0), (0, 0)), mode="edge")
+    rolling_sum = np.zeros((h, w), np.float32)
+    rolling_sq_sum = np.zeros((h, w), np.float32)
+    counts = np.zeros(n, np.float32)
+    backgrounds = np.zeros_like(frames, np.float32)
 
-    # Precompute initial sums for the first window
-    rolling_sum = np.sum(padded[:window], axis=0, dtype=np.float32)
-    rolling_sq_sum = np.sum(padded[:window] ** 2, axis=0, dtype=np.float32)
-
-    backgrounds = np.zeros_like(frames, dtype=np.float32)
+    # Pre-fill the first window manually
+    for i in range(min(window, n)):
+        rolling_sum += frames[i]
+        rolling_sq_sum += frames[i] ** 2
+    counts[:radius] = np.arange(radius, 0, -1) + radius  # (fewer neighbors at edges)
 
     for i in range(n):
-        # Compute mean and std for current window
-        mean = rolling_sum / window
-        std = np.sqrt(np.maximum(rolling_sq_sum / window - mean**2, 0.0))
+        # Determine actual window boundaries
+        start = max(0, i - radius)
+        end = min(n, i + radius + 1)
+        win_len = end - start
 
-        # Exclude outliers (like _find_background())
+        # Compute mean/std using current sums
+        mean = rolling_sum / win_len
+        std = np.sqrt(np.maximum(rolling_sq_sum / win_len - mean**2, 0.0))
+
         thr = mean + pixel_std_coeff * std
-        window_frames = padded[i:i + window]
+        window_frames = frames[start:end]
         masked = np.where(window_frames <= thr, window_frames, np.nan)
         bg = np.nanmean(masked, axis=0)
-        bg = np.nan_to_num(bg, nan=mean)  # fallback if all were NaN
+        backgrounds[i] = np.nan_to_num(bg, nan=mean)
 
-        backgrounds[i] = bg
-
-        # Roll window forward (remove oldest, add newest)
-        if i < n - 1:
-            rolling_sum += padded[i + window] - padded[i]
-            rolling_sq_sum += padded[i + window] ** 2 - padded[i] ** 2
+        # Update rolling window
+        if end < n:
+            rolling_sum += frames[end]
+            rolling_sq_sum += frames[end] ** 2
+        if start > 0:
+            rolling_sum -= frames[start - 1]
+            rolling_sq_sum -= frames[start - 1] ** 2
 
     return backgrounds
 
@@ -1090,7 +1031,7 @@ def chunked_nanmean(array, step):
 
 def process_chunk(args):
     """Worker function for parallel processing of video chunks"""
-    filename, start, end, plot, show_plots, save_plots, output_folder = args
+    filename, start, end, plot, show_plots, save_plots, output_folder, params = args
     chunk = load_video_frames(filename, frames_start=start, frames_end=end)
     return detect_damaged_pixels(
                                  chunk,
@@ -1098,6 +1039,7 @@ def process_chunk(args):
                                  show_plots=show_plots,
                                  save_plots=save_plots,
                                  output_folder=output_folder,
+                                 params=params,
                                  )
 
 
@@ -1110,6 +1052,7 @@ def main(
     show_plots: bool = False,
     save_plots: bool = False,
     output_folder: str = "results",
+    params: dict | None = None
 ):
     """
     Processes a video in chunks, computes damaged‐pixel statistics,
@@ -1148,6 +1091,7 @@ def main(
                    show_plots,
                    save_plots,
                    output_folder,
+                   params,
                   ) for i in range(len(monolith_frames_list)-1)
                   ]
 
@@ -1199,6 +1143,15 @@ if __name__ == "__main__":
     parser.add_argument("-shp", "--show_plots", help="True or False, determines whether the program visually shows plots")
     parser.add_argument("-svp", "--save_plots", help="True or False, determines whether the program saves plots")
     parser.add_argument("-of", "--output_folder", help="Location of where saved plots are saved")
+    parser.add_argument("-ct", "--consecutive_threshold")
+    parser.add_argument("-bt", "--brightness_threshold")
+    parser.add_argument("-ft", "--flow_threshold")
+    parser.add_argument("-st", "--static_threshold")
+    parser.add_argument("-mncs", "--min_cluster_size")
+    parser.add_argument("-mxcs", "--max_cluster_size")
+    parser.add_argument("-mnc", "--min_circularity")
+    parser.add_argument("-swr", "--sliding_window_radius")
+    parser.add_argument("-np", "--number_of_plots")
     args = parser.parse_args()
 
     VIDEO_FILENAME = args.video_filename if args.video_filename else "11_01_H_170726081325.avi"
@@ -1216,6 +1169,18 @@ if __name__ == "__main__":
     save_plots = (args.save_plots.lower() == "true") if args.save_plots else False
     output_folder = args.output_folder if args.output_folder else "results"
 
+    params = {
+        'consecutive_threshold': int(args.consecutive_threshold) if args.consecutive_threshold else 2,
+        'brightness_threshold': int(args.brightness_threshold) if args.brightness_threshold else 170,
+        'flow_threshold': float(args.flow_threshold) if args.flow_threshold else 2.0,
+        'static_threshold': int(args.static_threshold) if args.static_threshold else 50,
+        'min_cluster_size': int(args.min_cluster_size) if args.min_cluster_size else 5,
+        'max_cluster_size': int(args.max_cluster_size) if args.max_cluster_size else 20,
+        'min_circularity': float(args.min_circularity) if args.min_circularity else 0.1,
+        'sliding_window_radius': int(args.sliding_window_radius) if args.sliding_window_radius else 3,
+        'number_of_plots': int(args.number_of_plots) if args.number_of_plots else 20,
+    }
+
     # for a quick test on only 2 chunks:
     results = main(
                    VIDEO_FILENAME,
@@ -1226,6 +1191,7 @@ if __name__ == "__main__":
                    show_plots=show_plots,
                    save_plots=save_plots,
                    output_folder=output_folder,
+                   params=params,
     )
 
     print("counts:", results["averages_counts"])

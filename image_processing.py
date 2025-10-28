@@ -252,16 +252,10 @@ def _find_background(frames, pixel_std_coeff=1.0):
     return bg
 """
 
-
+"""
 # Does behave differently to how it did before, will have to compare outputted results
 # (It now pads out each end with duplicates of the edges)
 def compute_background(frames, radius, pixel_std_coeff=1.0):
-    """
-    estimate background brightness for each pixel of a given frame, based on
-    the mean brightness of that pixel in the frames in a sliding window
-    (providing the pixel is undamaged in those frames), implementing a
-    rolling buffer
-    """
     frames = frames.astype(np.float32)
     n, h, w = frames.shape
     window = 2 * radius + 1
@@ -293,6 +287,56 @@ def compute_background(frames, radius, pixel_std_coeff=1.0):
         if i < n - 1:
             rolling_sum += padded[i + window] - padded[i]
             rolling_sq_sum += padded[i + window] ** 2 - padded[i] ** 2
+
+    return backgrounds
+"""
+
+
+def compute_background(frames, radius, pixel_std_coeff=1.0):
+    """
+    estimate background brightness for each pixel of a given frame, based on
+    the mean brightness of that pixel in the frames in a sliding window
+    (providing the pixel is undamaged in those frames), implementing a
+    rolling buffer
+    """
+    frames = frames.astype(np.float32)
+    n, h, w = frames.shape
+    window = 2 * radius + 1
+
+    rolling_sum = np.zeros((h, w), np.float32)
+    rolling_sq_sum = np.zeros((h, w), np.float32)
+    counts = np.zeros(n, np.float32)
+    backgrounds = np.zeros_like(frames, np.float32)
+
+    # Pre-fill the first window manually
+    for i in range(min(window, n)):
+        rolling_sum += frames[i]
+        rolling_sq_sum += frames[i] ** 2
+    counts[:radius] = np.arange(radius, 0, -1) + radius  # (fewer neighbors at edges)
+
+    for i in range(n):
+        # Determine actual window boundaries
+        start = max(0, i - radius)
+        end = min(n, i + radius + 1)
+        win_len = end - start
+
+        # Compute mean/std using current sums
+        mean = rolling_sum / win_len
+        std = np.sqrt(np.maximum(rolling_sq_sum / win_len - mean**2, 0.0))
+
+        thr = mean + pixel_std_coeff * std
+        window_frames = frames[start:end]
+        masked = np.where(window_frames <= thr, window_frames, np.nan)
+        bg = np.nanmean(masked, axis=0)
+        backgrounds[i] = np.nan_to_num(bg, nan=mean)
+
+        # Update rolling window
+        if end < n:
+            rolling_sum += frames[end]
+            rolling_sq_sum += frames[end] ** 2
+        if start > 0:
+            rolling_sum -= frames[start - 1]
+            rolling_sq_sum -= frames[start - 1] ** 2
 
     return backgrounds
 

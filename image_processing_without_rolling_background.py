@@ -1047,7 +1047,7 @@ def chunked_nanmean(array, step):
 
 def process_chunk(args):
     """Worker function for parallel processing of video chunks"""
-    filename, start, end, plot, show_plots, save_plots, output_folder = args
+    filename, start, end, plot, show_plots, save_plots, output_folder, params = args
     chunk = load_video_frames(filename, frames_start=start, frames_end=end)
     return detect_damaged_pixels(
                                  chunk,
@@ -1055,6 +1055,7 @@ def process_chunk(args):
                                  show_plots=show_plots,
                                  save_plots=save_plots,
                                  output_folder=output_folder,
+                                 params=params,
                                  )
 
 
@@ -1067,6 +1068,7 @@ def main(
     show_plots: bool = False,
     save_plots: bool = False,
     output_folder: str = "results",
+    params: dict | None = None
 ):
     """
     Processes a video in chunks, computes damaged‐pixel statistics,
@@ -1105,6 +1107,7 @@ def main(
                    show_plots,
                    save_plots,
                    output_folder,
+                   params,
                   ) for i in range(len(monolith_frames_list)-1)
                   ]
 
@@ -1156,6 +1159,15 @@ if __name__ == "__main__":
     parser.add_argument("-shp", "--show_plots", help="True or False, determines whether the program visually shows plots")
     parser.add_argument("-svp", "--save_plots", help="True or False, determines whether the program saves plots")
     parser.add_argument("-of", "--output_folder", help="Location of where saved plots are saved")
+    parser.add_argument("-ct", "--consecutive_threshold")
+    parser.add_argument("-bt", "--brightness_threshold")
+    parser.add_argument("-ft", "--flow_threshold")
+    parser.add_argument("-st", "--static_threshold")
+    parser.add_argument("-mncs", "--min_cluster_size")
+    parser.add_argument("-mxcs", "--max_cluster_size")
+    parser.add_argument("-mnc", "--min_circularity")
+    parser.add_argument("-swr", "--sliding_window_radius")
+    parser.add_argument("-np", "--number_of_plots")
     args = parser.parse_args()
 
     VIDEO_FILENAME = args.video_filename if args.video_filename else "11_01_H_170726081325.avi"
@@ -1173,6 +1185,18 @@ if __name__ == "__main__":
     save_plots = (args.save_plots.lower() == "true") if args.save_plots else False
     output_folder = args.output_folder if args.output_folder else "results"
 
+    params = {
+        'consecutive_threshold': int(args.consecutive_threshold) if args.consecutive_threshold else 2,
+        'brightness_threshold': int(args.brightness_threshold) if args.brightness_threshold else 170,
+        'flow_threshold': float(args.flow_threshold) if args.flow_threshold else 2.0,
+        'static_threshold': int(args.static_threshold) if args.static_threshold else 50,
+        'min_cluster_size': int(args.min_cluster_size) if args.min_cluster_size else 5,
+        'max_cluster_size': int(args.max_cluster_size) if args.max_cluster_size else 20,
+        'min_circularity': float(args.min_circularity) if args.min_circularity else 0.1,
+        'sliding_window_radius': int(args.sliding_window_radius) if args.sliding_window_radius else 3,
+        'number_of_plots': int(args.number_of_plots) if args.number_of_plots else 20,
+    }
+
     # for a quick test on only 2 chunks:
     results = main(
                    VIDEO_FILENAME,
@@ -1183,6 +1207,7 @@ if __name__ == "__main__":
                    show_plots=show_plots,
                    save_plots=save_plots,
                    output_folder=output_folder,
+                   params=params,
     )
 
     print("counts:", results["averages_counts"])
