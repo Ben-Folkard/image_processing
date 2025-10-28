@@ -216,10 +216,6 @@ def compute_background(frames, radius, pixel_std_coeff=1.0):
         num_neighbours = end - start - 1
 
         # Updating rolling window:
-        # (Only neighbours are computed)
-        central_frame = frames[i] if (start > 0) else frames[radius]
-        rolling_sum -= central_frame
-        rolling_sq_sum -= central_frame**2
         # (The ends move if required)
         if end < n:
             rolling_sum += frames[end]
@@ -227,6 +223,12 @@ def compute_background(frames, radius, pixel_std_coeff=1.0):
         if start > 0:
             rolling_sum -= frames[start - 1]
             rolling_sq_sum -= frames[start - 1] ** 2
+            # (Only neighbours are computed)
+            central_frame = frames[i]
+        else:
+            central_frame = frames[radius]
+        rolling_sum -= central_frame
+        rolling_sq_sum -= central_frame**2
 
         # Compute mean/std using current sums
         mean = rolling_sum / num_neighbours
