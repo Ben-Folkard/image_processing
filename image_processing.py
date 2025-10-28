@@ -292,13 +292,8 @@ def compute_background(frames, radius, pixel_std_coeff=1.0):
 """
 
 
+"""
 def compute_background(frames, radius, pixel_std_coeff=1.0):
-    """
-    estimate background brightness for each pixel of a given frame, based on
-    the mean brightness of that pixel in the frames in a sliding window
-    (providing the pixel is undamaged in those frames), implementing a
-    rolling buffer
-    """
     frames = frames.astype(np.float32)
     n, h, w = frames.shape
     window = 2 * radius + 1
@@ -337,6 +332,49 @@ def compute_background(frames, radius, pixel_std_coeff=1.0):
         if start > 0:
             rolling_sum -= frames[start - 1]
             rolling_sq_sum -= frames[start - 1] ** 2
+
+    return backgrounds
+"""
+
+
+def compute_background(frames, radius, pixel_std_coeff=1.0):
+    """
+    estimate background brightness for each pixel of a given frame, based on
+    the mean brightness of that pixel in the frames in a sliding window
+    (providing the pixel is undamaged in those frames), implementing a
+    rolling buffer
+    """
+    frames = frames.astype(np.float32)
+    n, h, w = frames.shape
+    window = 2 * radius + 1
+
+    padded = np.pad(frames, ((radius, radius), (0, 0), (0, 0)), mode="edge")
+    backgrounds = np.zeros_like(frames, dtype=np.float32)
+
+    # Rolling sums for full window
+    rolling_sum = np.sum(padded[:window], axis=0)
+    rolling_sq_sum = np.sum(padded[:window] ** 2, axis=0)
+
+    for i in range(n):
+        # remove center frame contribution (old behavior)
+        center_idx = i + radius
+        mean = (rolling_sum - padded[center_idx]) / (window - 1)
+        std = np.sqrt(np.maximum(
+            ((rolling_sq_sum - padded[center_idx] ** 2) / (window - 1)) - mean**2, 0.0
+        ))
+
+        thr = mean + pixel_std_coeff * std
+        window_frames = np.concatenate(
+            (padded[i:i + radius], padded[i + radius + 1:i + window]), axis=0
+        )
+        masked = np.where(window_frames <= thr, window_frames, np.nan)
+        bg = np.nanmean(masked, axis=0)
+        backgrounds[i] = np.nan_to_num(bg, nan=mean)
+
+        # advance rolling window
+        if i < n - 1:
+            rolling_sum += padded[i + window] - padded[i]
+            rolling_sq_sum += padded[i + window] ** 2 - padded[i] ** 2
 
     return backgrounds
 
