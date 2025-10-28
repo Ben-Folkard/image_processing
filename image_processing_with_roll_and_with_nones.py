@@ -185,13 +185,8 @@ def _prepare_settings(params):
 
 
 def compute_background(frames, radius, pixel_std_coeff=1.0):
-    """
-    estimate background brightness for each pixel of a given frame, based on
-    the mean brightness of that pixel in the frames in a sliding window
-    (providing the pixel is undamaged in those frames), implementing a
-    rolling buffer
-    """
     frames = frames.astype(np.float32)
+    frames_sq = frames ** 2
     n, h, w = frames.shape
     window = 2 * radius + 1
 
@@ -202,7 +197,7 @@ def compute_background(frames, radius, pixel_std_coeff=1.0):
     # Pre-fill the first window manually
     for i in range(min(window, n)-1):
         rolling_sum += frames[i]
-        rolling_sq_sum += frames[i] ** 2
+        rolling_sq_sum += frames_sq[i]
 
     for i in range(n):
         # Determine actual window boundaries
@@ -214,16 +209,18 @@ def compute_background(frames, radius, pixel_std_coeff=1.0):
         # (The ends move if required)
         if end < n:
             rolling_sum += frames[end]
-            rolling_sq_sum += frames[end] ** 2
+            rolling_sq_sum += frames_sq[end]
         if start > 0:
             rolling_sum -= frames[start - 1]
-            rolling_sq_sum -= frames[start - 1] ** 2
+            rolling_sq_sum -= frames_sq[start - 1]
             # (Only neighbours are computed)
             central_frame = frames[i]
+            central_frame_sq = frames_sq[i]
         else:
             central_frame = frames[radius]
+            central_frame_sq = frames_sq[radius]
         rolling_sum -= central_frame
-        rolling_sq_sum -= central_frame**2
+        rolling_sq_sum -= central_frame_sq
 
         # Compute mean/std using current sums
         mean = rolling_sum / num_neighbours
@@ -237,7 +234,7 @@ def compute_background(frames, radius, pixel_std_coeff=1.0):
 
         # Re-include the central frame to become a future neighbour
         rolling_sum += central_frame
-        rolling_sq_sum += central_frame**2
+        rolling_sq_sum += central_frame_sq
     return backgrounds
 
 
