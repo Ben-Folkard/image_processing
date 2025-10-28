@@ -195,34 +195,47 @@ def compute_background(frames, radius, pixel_std_coeff=1.0):
     n, h, w = frames.shape
     window = 2 * radius + 1
 
-    padded = np.pad(frames, ((radius, radius), (0, 0), (0, 0)), mode="edge")
-    backgrounds = np.zeros_like(frames, dtype=np.float32)
+    rolling_sum = np.zeros((h, w), np.float32)
+    rolling_sq_sum = np.zeros((h, w), np.float32)
+    backgrounds = np.zeros_like(frames, np.float32)
 
-    # Rolling sums for full window
-    rolling_sum = np.sum(padded[:window], axis=0)
-    rolling_sq_sum = np.sum(padded[:window] ** 2, axis=0)
+    # Pre-fill the first window manually
+    for i in range(min(window, n)-1):
+        rolling_sum += frames[i]
+        rolling_sq_sum += frames[i] ** 2
 
     for i in range(n):
-        # remove center frame contribution (old behavior)
-        center_idx = i + radius
-        mean = (rolling_sum - padded[center_idx]) / (window - 1)
-        std = np.sqrt(np.maximum(
-            ((rolling_sq_sum - padded[center_idx] ** 2) / (window - 1)) - mean**2, 0.0
-        ))
+        # Determine actual window boundaries
+        start = max(0, i - radius)
+        end = min(n, i + radius + 1)
+        num_neighbours = end - start - 1
+
+        # Updating rolling window:
+        # (Only neighbours are computed)
+        central_frame = frames[i]
+        rolling_sum -= central_frame
+        rolling_sq_sum -= central_frame**2
+        # (The ends move if required)
+        if end < n:
+            rolling_sum += frames[end]
+            rolling_sq_sum += frames[end] ** 2
+        if start > 0:
+            rolling_sum -= frames[start - 1]
+            rolling_sq_sum -= frames[start - 1] ** 2
+
+        # Compute mean/std using current sums
+        mean = rolling_sum / num_neighbours
+        std = np.sqrt(np.maximum(rolling_sq_sum / num_neighbours - mean**2, 0.0))
 
         thr = mean + pixel_std_coeff * std
-        window_frames = np.concatenate(
-            (padded[i:i + radius], padded[i + radius + 1:i + window]), axis=0
-        )
+        window_frames = frames[start:end]
         masked = np.where(window_frames <= thr, window_frames, np.nan)
         bg = np.nanmean(masked, axis=0)
         backgrounds[i] = np.nan_to_num(bg, nan=mean)
 
-        # advance rolling window
-        if i < n - 1:
-            rolling_sum += padded[i + window] - padded[i]
-            rolling_sq_sum += padded[i + window] ** 2 - padded[i] ** 2
-
+        # Re-include the central frame to become a future neighbour
+        rolling_sum += central_frame
+        rolling_sq_sum += central_frame**2
     return backgrounds
 
 
