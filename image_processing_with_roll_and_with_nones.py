@@ -185,6 +185,12 @@ def _prepare_settings(params):
 
 
 def compute_background(frames, radius, pixel_std_coeff=1.0):
+    """
+    estimate background brightness for each pixel of a given frame, based on
+    the mean brightness of that pixel in the frames in a sliding window
+    (providing the pixel is undamaged in those frames), implementing a
+    rolling buffer
+    """
     frames = frames.astype(np.float32)
     frames_sq = frames ** 2
     n, h, w = frames.shape
@@ -213,12 +219,9 @@ def compute_background(frames, radius, pixel_std_coeff=1.0):
         if start > 0:
             rolling_sum -= frames[start - 1]
             rolling_sq_sum -= frames_sq[start - 1]
-            # (Only neighbours are computed)
-            central_frame = frames[i]
-            central_frame_sq = frames_sq[i]
-        else:
-            central_frame = frames[radius]
-            central_frame_sq = frames_sq[radius]
+        # (Only neighbours are computed)
+        central_frame = frames[i]
+        central_frame_sq = frames_sq[i]
         rolling_sum -= central_frame
         rolling_sq_sum -= central_frame_sq
 

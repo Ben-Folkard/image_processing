@@ -189,166 +189,13 @@ def _prepare_settings(params):
     return type('S', (), defaults)
 
 
-"""
-estimate background brightness for each pixel of a given frame, based on
-the mean brightness of that pixel in the frames in a sliding window
-(providing the pixel is undamaged in those frames), implementing a
-rolling buffer
-"""
-"""
-# Old non-rolling background version
-def compute_background(frames, index, radius):
-    start = max(0, index - radius)
-    end = min(len(frames), index + radius + 1)
-
-    neighbours = np.asarray(frames[start:end], dtype=DTYPE_COMPUTE)
-    center_idx = index - start
-
-    mask = np.ones(len(neighbours), dtype=DTYPE_MASK)
-    mask[center_idx] = False
-
-    neighbours = neighbours[mask]
-
-    return _find_background(neighbours)
-
-
-@njit(parallel=True, fastmath=True)
-def _find_background(frames, pixel_std_coeff=1.0):
-    n, h, w = frames.shape
-    pixel_means = np.zeros((h, w), DTYPE_COMPUTE)
-    pixel_stds = np.zeros((h, w), DTYPE_COMPUTE)
-    bg = np.zeros((h, w), DTYPE_COMPUTE)
-
-    # Compute mean
-    for i in prange(h):
-        for j in range(w):
-            s = 0.0
-            for k in range(n):
-                s += frames[k, i, j]
-            pixel_means[i, j] = s / n
-
-    # Compute std
-    for i in prange(h):
-        for j in range(w):
-            s = 0.0
-            for k in range(n):
-                diff = frames[k, i, j] - pixel_means[i, j]
-                s += diff * diff
-            pixel_stds[i, j] = (s / n) ** 0.5
-
-    # Compute background excluding outliers
-    for i in prange(h):
-        for j in range(w):
-            thr = pixel_means[i, j] + pixel_std_coeff * pixel_stds[i, j]
-            s = 0.0
-            c = 0
-            for k in range(n):
-                val = frames[k, i, j]
-                if val <= thr:
-                    s += val
-                    c += 1
-            if c > 0:
-                bg[i, j] = s / c
-            else:
-                s_all = 0.0
-                for k in range(n):
-                    s_all += frames[k, i, j]
-                bg[i, j] = s_all / n
-
-    return bg
-"""
-
-"""
-# Does behave differently to how it did before, will have to compare outputted results
-# (It now pads out each end with duplicates of the edges)
 def compute_background(frames, radius, pixel_std_coeff=1.0):
-    frames = frames.astype(DTYPE_COMPUTE)
-    n, h, w = frames.shape
-    window = 2 * radius + 1
-
-    # Pad with edge frames so boundaries are well defined
-    padded = np.pad(frames, ((radius, radius), (0, 0), (0, 0)), mode="edge")
-
-    # Precompute initial sums for the first window
-    rolling_sum = np.sum(padded[:window], axis=0, dtype=DTYPE_COMPUTE)
-    rolling_sq_sum = np.sum(padded[:window] ** 2, axis=0, dtype=DTYPE_COMPUTE)
-
-    backgrounds = np.zeros_like(frames, dtype=DTYPE_COMPUTE)
-
-    for i in range(n):
-        # Compute mean and std for current window
-        mean = rolling_sum / window
-        std = np.sqrt(np.maximum(rolling_sq_sum / window - mean**2, 0.0))
-
-        # Exclude outliers (like _find_background())
-        thr = mean + pixel_std_coeff * std
-        window_frames = padded[i:i + window]
-        masked = np.where(window_frames <= thr, window_frames, np.nan)
-        bg = np.nanmean(masked, axis=0)
-        bg = np.nan_to_num(bg, nan=mean)  # fallback if all were NaN
-
-        backgrounds[i] = bg
-
-        # Roll window forward (remove oldest, add newest)
-        if i < n - 1:
-            rolling_sum += padded[i + window] - padded[i]
-            rolling_sq_sum += padded[i + window] ** 2 - padded[i] ** 2
-
-    return backgrounds
-"""
-
-"""
-def compute_background(frames, radius, pixel_std_coeff=1.0):
-    frames = frames.astype(DTYPE_COMPUTE)
-    n, h, w = frames.shape
-    window = 2 * radius + 1
-
-    rolling_sum = np.zeros((h, w), DTYPE_COMPUTE)
-    rolling_sq_sum = np.zeros((h, w), DTYPE_COMPUTE)
-    backgrounds = np.zeros_like(frames, DTYPE_COMPUTE)
-
-    # Pre-fill the first window manually
-    for i in range(min(window, n)-1):
-        rolling_sum += frames[i]
-        rolling_sq_sum += frames[i] ** 2
-
-    for i in range(n):
-        # Determine actual window boundaries
-        start = max(0, i - radius)
-        end = min(n, i + radius + 1)
-        num_neighbours = end - start - 1
-
-        # Updating rolling window:
-        # (Only neighbours are computed)
-        central_frame = frames[i]
-        rolling_sum -= central_frame
-        rolling_sq_sum -= central_frame**2
-        # (The ends move if required)
-        if end < n:
-            rolling_sum += frames[end]
-            rolling_sq_sum += frames[end] ** 2
-        if start > 0:
-            rolling_sum -= frames[start - 1]
-            rolling_sq_sum -= frames[start - 1] ** 2
-
-        # Compute mean/std using current sums
-        mean = rolling_sum / num_neighbours
-        std = np.sqrt(np.maximum(rolling_sq_sum / num_neighbours - mean**2, 0.0))
-
-        thr = mean + pixel_std_coeff * std
-        window_frames = frames[start:end]
-        masked = np.where(window_frames <= thr, window_frames, np.nan)
-        bg = np.nanmean(masked, axis=0)
-        backgrounds[i] = np.nan_to_num(bg, nan=mean)
-
-        # Re-include the central frame to become a future neighbour
-        rolling_sum += central_frame
-        rolling_sq_sum += central_frame**2
-    return backgrounds
-"""
-
-
-def compute_background(frames, radius, pixel_std_coeff=1.0):
+    """
+    estimate background brightness for each pixel of a given frame, based on
+    the mean brightness of that pixel in the frames in a sliding window
+    (providing the pixel is undamaged in those frames), implementing a
+    rolling buffer
+    """
     frames = frames.astype(DTYPE_COMPUTE)
     frames_sq = frames ** 2
     n, h, w = frames.shape
@@ -377,12 +224,18 @@ def compute_background(frames, radius, pixel_std_coeff=1.0):
         if start > 0:
             rolling_sum -= frames[start - 1]
             rolling_sq_sum -= frames_sq[start - 1]
-            # (Only neighbours are computed)
+
+        # (Only neighbours are computed)
+        # (Original flawed logic commented below)
+        """
             central_frame = frames[i]
             central_frame_sq = frames_sq[i]
         else:
             central_frame = frames[radius]
             central_frame_sq = frames_sq[radius]
+        """
+        central_frame = frames[i]
+        central_frame_sq = frames_sq[i]
         rolling_sum -= central_frame
         rolling_sq_sum -= central_frame_sq
 
