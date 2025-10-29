@@ -16,13 +16,14 @@ I should go through here and time each thing to see where the bottlenecks are
 
 # importing libraries
 import cv2
+import imageio.v3 as iio
 import os
 import numpy as np
 import requests
 # from numba import njit, prange
 from concurrent.futures import ThreadPoolExecutor
 from joblib import Parallel, delayed
-from multiprocessing import Pool, cpu_count
+from multiprocessing import Pool, cpu_count  # , shared_memory
 
 try:
     import matplotlib
@@ -95,6 +96,30 @@ def load_video_frames(filename, frames_start=None, frames_end=None, grayscale=Tr
 """
 
 
+"""
+def load_video_frames(filename, frames_start=None, frames_end=None, grayscale=True):
+    try:
+        # Read all frames at once (lazy streaming, not full memory load)
+        frames = iio.imread(filename, plugin="ffmpeg", format="gray" if grayscale else None)
+    except Exception as e:
+        raise IOError(f"Failed to read video '{filename}': {e}")
+
+    # Convert to NumPy array (uint8)
+    frames = np.asarray(frames, dtype=DTYPE_IMAGE)
+
+    total_frames = frames.shape[0]
+    start = frames_start or 0
+    end = frames_end or total_frames
+
+    # Slice requested frame range
+    frames = frames[start:end]
+
+    print(f"Loaded {len(frames)} frames from {filename} (shape: {frames.shape})")
+
+    return frames
+"""
+
+"""
 # CPU version (for unknown reasons ended up being slower)
 def load_video_frames(filename, frames_start=None, frames_end=None, grayscale=True):
     cap = cv2.VideoCapture(filename)
@@ -115,16 +140,41 @@ def load_video_frames(filename, frames_start=None, frames_end=None, grayscale=Tr
     i = 0
     while i < n_frames:
         ret, frame = cap.read()
-        if not ret:
+        if not ret or frame is None:
+            print(f"Warning: failed to read frame {i}")
             break
         if grayscale and len(frame.shape) == 3:
-            frame = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+            try:
+                frame = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+            except Exception as e:
+                print(f"Frame {start + i} conversion failed: {e}")
+                continue
         frames[i] = frame
         i += 1
 
     cap.release()
 
     return frames[:i]
+"""
+
+
+def load_video_frames(filename, frames_start=None, frames_end=None, grayscale=True):
+    """
+    Streams video frames lazily using imageio.v3.imiter().
+    Only the requested range is read into memory.
+    """
+    frames = []
+
+    for i, frame in enumerate(iio.imiter(filename)):
+        if frames_start is not None and i < frames_start:
+            continue
+        if frames_end is not None and i >= frames_end:
+            break
+        if grayscale and frame.ndim == 3:
+            frame = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+        frames.append(frame)
+
+    return np.asarray(frames, dtype=DTYPE_IMAGE)
 
 
 """
@@ -148,16 +198,14 @@ def get_video_frames_from_url(
         frames_start=None,
         frames_end=None
         ):
-    """
-    takes video url and loads frames in directly
-    """
+    # takes video url and loads frames in directly
 
     download_video_from_url(url, local_filename)
 
     return load_video_frames(local_filename, frames_start, frames_end)
 
-
 # helper functions
+
 
 def _prepare_settings(params):
     """
@@ -987,24 +1035,49 @@ def chunked_nanmean(array, step):
 
 
 def process_chunk(args):
-    """Worker function for parallel processing of video chunks"""
     filename, start, end, plot, show_plots, save_plots, output_folder, params = args
+
     chunk = load_video_frames(filename, frames_start=start, frames_end=end)
-    return detect_damaged_pixels(
-                                 chunk,
-                                 plot=plot,
-                                 show_plots=show_plots,
-                                 save_plots=save_plots,
-                                 output_folder=output_folder,
-                                 params=params,
-                                 )
+
+    results = detect_damaged_pixels(
+                                    chunk,
+                                    plot=plot,
+                                    show_plots=show_plots,
+                                    save_plots=save_plots,
+                                    output_folder=output_folder,
+                                    params=params,
+                                    )
+
+    return results
+
+
+"""
+def process_chunk(args):
+    # Worker function for parallel processing of video chunks
+    shm_name, shape, dtype, start, end, plot, show_plots, save_plots, output_folder, params = args
+
+    shm = shared_memory.SharedMemory(name=shm_name)
+    chunk = np.ndarray(shape, dtype=dtype, buffer=shm.buf)[start:end]
+
+    results = detect_damaged_pixels(
+                                    chunk,
+                                    plot=plot,
+                                    show_plots=show_plots,
+                                    save_plots=save_plots,
+                                    output_folder=output_folder,
+                                    params=params,
+                                    )
+
+    shm.close()
+    return results
+"""
 
 
 def main(
     video_filename: str,
     average_time: float = 1.0,
     max_chunks: int | None = None,
-    STEP_SIZE: int = 1000,
+    step_size: int = 1000,
     plot: bool = False,
     show_plots: bool = False,
     save_plots: bool = False,
@@ -1019,38 +1092,40 @@ def main(
     - video_filename: path to the AVI file
     - average_time: how many seconds to average over in the final summaries
     - max_chunks: if not None, only process that many chunks (for quick tests)
-    - STEP_SIZE: The number of steps each chunk is split into
+    - step_size: The number of steps each chunk is split into
     - plot: True or False, determines whether the program plots
     - show_plots: True or False, determines whether the program visually shows plots
     - save_plots: True or False, determines whether the program saves plots
     - output_folder: Location of where saved plots are saved
     """
-    # open video
+    # Getting total frame count and FPS without loading the whole video
     cap = cv2.VideoCapture(video_filename)
-    NUM_FRAMES = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+    num_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
     FPS = cap.get(cv2.CAP_PROP_FPS)
     cap.release()
 
     # break into chunks for easier parsing
-    monolith_frames_list = np.arange(0, NUM_FRAMES, STEP_SIZE)
-    if monolith_frames_list[-1] != NUM_FRAMES:
-        monolith_frames_list = np.concatenate([monolith_frames_list, [NUM_FRAMES]])
+    monolith_frames_list = np.arange(0, num_frames, step_size)
+    if monolith_frames_list[-1] != num_frames:
+        monolith_frames_list = np.concatenate([monolith_frames_list, [num_frames]])
 
     # apply user defined limit of how many video chunks to process
     if max_chunks is not None:
         monolith_frames_list = monolith_frames_list[:max_chunks+1]
 
-    chunk_args = [(
-                   video_filename,
-                   monolith_frames_list[i],
-                   monolith_frames_list[i + 1],
-                   plot,
-                   show_plots,
-                   save_plots,
-                   output_folder,
-                   params,
-                  ) for i in range(len(monolith_frames_list)-1)
-                  ]
+    chunk_args = [
+        (
+            video_filename,
+            start,
+            end,
+            plot,
+            show_plots,
+            save_plots,
+            output_folder,
+            params,
+        )
+        for start, end in zip(monolith_frames_list[:-1], monolith_frames_list[1:])
+    ]
 
     num_workers = min(len(chunk_args), cpu_count())
     print(f"Using {num_workers} worker processes")
@@ -1120,7 +1195,7 @@ if __name__ == "__main__":
             max_chunks = int(args.max_chunks)
     else:
         max_chunks = 2
-    STEP_SIZE = int(args.step_size) if args.step_size else 1000
+    step_size = int(args.step_size) if args.step_size else 1000
     plot = (args.plot.lower() == "true") if args.plot else False
     show_plots = (args.show_plots.lower() == "true") if args.show_plots else plot
     save_plots = (args.save_plots.lower() == "true") if args.save_plots else False
@@ -1143,7 +1218,7 @@ if __name__ == "__main__":
                    VIDEO_FILENAME,
                    average_time=average_time,
                    max_chunks=max_chunks,
-                   STEP_SIZE=STEP_SIZE,
+                   step_size=step_size,
                    plot=plot,
                    show_plots=show_plots,
                    save_plots=save_plots,
