@@ -14,6 +14,7 @@ import requests
 import numpy as np
 # import time
 import image_processing as ip  # _new
+import imageio.v3 as iio
 # import image_processing_old as ip_old
 # ips = (ip_old, ip_new)
 
@@ -75,10 +76,16 @@ class FakeVideo:
 
 
 class DummySettings:
+    consecutive_threshold = 2
+    brightness_threshold = 170
     flow_threshold = 5
+    static_threshold = 50
     min_cluster_size = 2
     max_cluster_size = 10
     min_circularity = 0.3
+    sliding_window_radius = 3
+    number_of_plots = 20
+    kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3, 3))
 
 
 @pytest.fixture(autouse=True)
@@ -131,7 +138,7 @@ def test_load_all_frames(monkeypatch, tmp_path):
     dummy_frame = np.full((10, 10, 3), 128, dtype=np.uint8)
     dummy_frames = [dummy_frame for _ in range(10)]
 
-    monkeypatch.setattr(cv2, 'VideoCapture', lambda fn:
+    monkeypatch.setattr(iio, 'imiter', lambda fn:  # Need to fix
                         FakeVideo(dummy_frames))
 
     # should convert image to 2d grayscale
@@ -273,20 +280,37 @@ def test_compute_background():
         [[1, 5], [5, 1]],
         [[2, 6], [6, 2]],
         [[200, 200], [200, 200]],
+        [[7, 5], [3, 8]],
+        [[3, 1], [4, 5]],
         ], dtype=float)
 
     bg = ip.compute_background(frames, radius=1)
 
     expected_output = np.array([
-                                [[1.0, 5.0],
-                                 [5.0, 1.0]],
+                                [
+                                 [1.5, 5.5],
+                                 [5.5, 1.5],
+                                ],
 
-                                [[1.5, 5.5],
-                                 [5.5, 1.5]],
+                                [
+                                 [1.5, 5.5],
+                                 [5.5, 1.5],
+                                ],
 
-                                [[134.0, 135.33333],
-                                 [135.33333, 134.0]]
-    ], dtype=np.float32)
+                                [
+                                 [2., 5.5],
+                                 [4.5, 2.],
+                                ],
+
+                                [
+                                 [70., 68.666664],
+                                 [69., 71.]],
+
+                                [
+                                 [5., 3.],
+                                 [3., 6.5],
+                                ]
+                               ], dtype=np.float32)
 
     assert np.allclose(bg, expected_output)
 
@@ -297,8 +321,7 @@ def test_raw_damaged_mask(monkeypatch):
     background = np.array([[0, 0], [0, 0]], dtype=float)
 
     fake_mask = np.array([[1, 0], [0, 1]], dtype=int)
-    monkeypatch.setattr(ip, 'get_damaged_pixel_mask', lambda frame, height,
-                        width, background: (fake_mask, None))
+    monkeypatch.setattr(ip, 'get_damaged_pixel_mask', lambda frame, background: (fake_mask, None))
 
     mask = ip._raw_damaged_mask(frame, background)
     assert mask.dtype == bool
@@ -321,7 +344,8 @@ def test_compute_persistent_mask_simple():
 
 def test_compute_persistent_mask_with_reset():
     mask1 = np.array([[True, True], [False, True]])
-    mask2 = None
+    # mask2 = None
+    mask2 = np.array([[False, False], [False, False]])
     mask3 = np.array([[True, True], [True, False]])
 
     persistent = ip.compute_persistent_mask([mask1, mask2, mask3],
@@ -339,7 +363,7 @@ def test_filter_consecutive_pixels_basic():
 
     persistent = np.array([[True, False], [False, True]])
 
-    filtered, counts = ip.filter_consecutive_pixels(masks, persistent)
+    filtered, counts = ip.filter_consecutive_pixels(masks, persistent, return_counts=True)
 
     # assert isinstance(filtered, list) and isinstance(counts, list)
     assert filtered[0].shape == masks[0].shape
@@ -347,16 +371,18 @@ def test_filter_consecutive_pixels_basic():
     assert counts[1] == 1
 
 
+"""
 def test_filter_consecutive_pixels_with_none():
     masks = [None, np.array([[True]])]
     persistent = np.array([[False]])
 
-    filtered, counts = ip.filter_consecutive_pixels(masks, persistent)
+    filtered, counts = ip.filter_consecutive_pixels(masks, persistent, return_counts=True)
 
     assert filtered[0] is None
     assert np.isnan(counts[0])
     assert filtered[1].dtype == bool
     assert counts[1] == 1
+"""
 
 
 def test_compute_cluster_stats_flow_skips(monkeypatch):
@@ -366,8 +392,7 @@ def test_compute_cluster_stats_flow_skips(monkeypatch):
     flows = [0.0, 6.0, 0.0]
 
     monkeypatch.setattr(ip, 'filter_damaged_pixel_clusters',
-                        lambda frame, mask, count, size, brightness:
-                        (None, 42, 7, 123))
+                        lambda frame, mask, min_cluster_size, max_cluster_size, min_circularity, kernel: (None, 42, 7, 123))
 
     cluster_count, cluster_size, cluster_brightness = \
         ip.compute_cluster_stats(frames, masks, flows, DummySettings)
@@ -380,11 +405,11 @@ def test_compute_cluster_stats_flow_skips(monkeypatch):
 
 def test_compute_cluster_stats_mask_skips(monkeypatch):
     frames = [np.zeros((2, 2)) for _ in range(2)]
-    masks = [None, np.ones((2, 2), bool)]
+    masks = [np.zeros((2, 2), bool), np.ones((2, 2), bool)]
     flows = [0.0, 0.0]
 
-    monkeypatch.setattr(ip, 'filter_damaged_pixel_clusters', lambda frames,
-                        masks, count, size, brightness: (None, 5, 2, 50))
+    monkeypatch.setattr(ip, 'filter_damaged_pixel_clusters',
+                        lambda frame, mask, min_cluster_size, max_cluster_size, min_circularity, kernel: (None, 5, 2, 50))
 
     cluster_count, cluster_size, cluster_brightness = \
         ip.compute_cluster_stats(frames, masks, flows, DummySettings)
@@ -395,33 +420,35 @@ def test_compute_cluster_stats_mask_skips(monkeypatch):
 
 
 def test_get_final_count_basic():
-    masks = [np.array([[1, 1], [0, 1]], bool), None]
+    masks = [np.array([[1, 1], [0, 1]], bool), np.zeros((2, 2), bool)]
     estimates = [10, np.nan]
     out = ip._get_final_count(masks, estimates)
+    print(out)
 
     assert pytest.approx(out[0]) == 13.0
-    assert np.isnan(out[1])
+    assert pytest.approx(out[1]) == 0
+    # assert np.isnan(out[1])
 
 
 def test_generate_plot_calls(monkeypatch):
-    frames = [np.zeros((1, 1)) for _ in range(4)]
-    masks = [np.ones((1, 1), bool) for _ in range(4)]
-    counts = [1, 2, 3, 4]
-    flows = [0.0, 1.0, 2.0, 3.0]
+    frames = np.zeros((4, 1, 1))
+    masks = np.ones((4, 1, 1), bool)
+    counts = np.array([1, 2, 3, 4])
+    flows = np.array([0.0, 1.0, 2.0, 3.0])
     settings = DummySettings()
     settings.flow_threshold = 2.0
     settings.number_of_plots = 2
 
     called = {'visualisation': [], 'plot_counts': 0, 'heatmap_input': None}
-    monkeypatch.setattr(ip, 'visualise_damaged_pixels', lambda frames, masks,
-                        i: called['visualisation'].append(i))
-    monkeypatch.setattr(ip, 'plot_damaged_pixels', lambda counts:
-                        called.__setitem__('plot_counts',
-                                           called['plot_counts']+1))
-    monkeypatch.setattr(ip, 'find_damaged_pixel_heatmap', lambda frame,
-                        ml: np.array([[9]]))
-    monkeypatch.setattr(ip, 'plot_heatmap', lambda heatmap:
-                        called.__setitem__('heatmap_input', heatmap))
+    monkeypatch.setattr(ip, 'visualise_damaged_pixels',
+                        lambda frame, i, mask, count, show_plots, save_plots, output_folder: called['visualisation'].append(i))
+    monkeypatch.setattr(ip, 'plot_damaged_pixels',
+                        lambda counts, show_plots, save_plots, output_folder:
+                            called.__setitem__('plot_counts', called['plot_counts']+1))
+    monkeypatch.setattr(ip, 'find_damaged_pixel_heatmap',
+                        lambda frame, mask, brightness_threshold: np.array([[9]]))
+    monkeypatch.setattr(ip, 'plot_heatmap',
+                        lambda heatmap, show_plots, save_plots, output_folder: called.__setitem__('heatmap_input', heatmap))
 
     ip._generate_plots(frames, masks, counts, flows, settings)
 
@@ -433,11 +460,11 @@ def test_generate_plot_calls(monkeypatch):
 
 def test_compute_static_mask_simple():
     # generate 3 2x2 frames
-    frames = [np.array([[10, 200], [200, 10]]),
-              np.array([[10, 200], [200, 10]]),
-              np.array([[10, 50], [50, 10]])]
+    frames = np.array([[[10, 200], [200, 10]],
+                      [[10, 200], [200, 10]],
+                      [[10, 50], [50, 10]]])
 
-    masks = [frames[0] > 170, frames[1] > 170, frames[2] > 170]
+    masks = np.array([frames[0] > 170, frames[1] > 170, frames[2] > 170])
     out = ip.compute_static_mask(frames, masks, brightness_threshold=180,
                                  static_threshold=50, min_valid_frames=1)
 
@@ -448,20 +475,22 @@ def test_compute_static_mask_simple():
 
 def test_apply_static_suppression_basic():
     mask1 = np.array([[True, False], [True, True]])
-    mask2 = None
+    # mask2 = None
+    mask2 = np.zeros((2, 2), bool)
     masks = [mask1, mask2]
 
     persistent = np.array([[True, False], [False, False]])
     static_mask = np.array([[False, True], [False, False]])
 
-    final_masks, counts = ip.apply_static_suppression(masks, persistent,
-                                                      static_mask)
+    final_masks, counts = ip.apply_static_suppression(masks, persistent, static_mask, calc_counts=True)
     expected = mask1 & ~(persistent | static_mask)
 
     assert np.array_equal(expected, final_masks[0])
     assert counts[0] == int(expected.sum())
-    assert final_masks[1] is None
-    assert np.isnan(counts[1])
+    # assert final_masks[1] is None
+    # assert np.isnan(counts[1])
+    assert np.array_equal(final_masks[1], np.zeros((2, 2), bool))
+    assert counts[1] == 0
 
 
 def test_detect_damaged_pixels_pipeline(monkeypatch):
@@ -532,7 +561,7 @@ def test_get_damaged_pixel_mask_simple():
     frame[1, 1] = 100
     background = np.zeros((3, 3), dtype=float)
 
-    mask_uint8, thresholds = ip.get_damaged_pixel_mask(frame, 3, 3, background)
+    mask_uint8, thresholds = ip.get_damaged_pixel_mask(frame, background)
 
     assert thresholds.shape == (3, 3)
     assert np.all(thresholds == 30)
@@ -548,8 +577,7 @@ def test_get_damaged_pixel_mask_background_scaling():
     background = np.zeros((2, 2), dtype=float)
     background[0, 0] = 255.0
 
-    mask_uint8, thresholds = ip.get_damaged_pixel_mask(frame, 2, 2,
-                                                       background)
+    mask_uint8, thresholds = ip.get_damaged_pixel_mask(frame, background)
     assert thresholds[0, 0] == pytest.approx(255.0)
     assert mask_uint8[0, 0] == 0
 
@@ -568,16 +596,18 @@ def test_filter_damaged_pixel_clusters():
     damaged_mask[3, 3] = 1
     damaged_mask[2, 3] = 1
 
-    min_cluster_size = 2
-    max_cluster_size = 2
-    min_circularity = 0.0
+    settings = DummySettings()
+    settings.min_cluster_size = 2
+    settings.max_cluster_size = 2
+    settings.min_circularity = 0.0
 
     cleaned_mask, count, _, _ = ip.filter_damaged_pixel_clusters(
         frame,
         damaged_mask,
-        min_cluster_size,
-        max_cluster_size,
-        min_circularity
+        settings.min_cluster_size,
+        settings.max_cluster_size,
+        settings.min_circularity,
+        settings.kernel,
     )
 
     # two clusters survive => cleaned_mask has 4 True entries
@@ -618,21 +648,21 @@ def test_remove_bright_regions_positive():
 
 def test_estimate_damaged_pixels_in_bright_areas():
     "nonzero damaged pixel density"
-    frames = [
-        np.array([[10, 10], [200, 200]], float),
-        np.array([[255, 255], [255, 255]], float),
-    ]
+    frames = np.array([
+                       [[10, 10], [200, 200]],
+                       [[255, 255], [255, 255]],
+                      ], dtype=np.float32)
 
-    damaged_pixel_masks = [
-        np.array([[True, False], [False, False]]),
-        np.array([[False, False], [False, False]]),
-    ]
+    damaged_pixel_masks = np.array([
+                                    [[True, False], [False, False]],
+                                    [[False, False], [False, False]],
+                                   ], dtype=np.bool_)
 
     output = ip.estimate_damaged_pixels_in_bright_areas(
-        frames,
-        damaged_pixel_masks,
-        brightness_threshold=100
-        )
+                                                        frames,
+                                                        damaged_pixel_masks,
+                                                        brightness_threshold=100,
+                                                        )
 
     assert output.shape == (2,)
     # density of frame 1 should be ((1 damaged / 1 valid) * 2 bright) = 2
@@ -656,9 +686,12 @@ def test_estimate_damaged_pixels_in_bright_areas_fail():
 
 
 def test_find_bright_area_estimates():
-    frames = [np.array([[150, 200], [50, 80]]),
-              np.array([[10, 20], [30, 40]])]
-    masks = [np.array([[False, False], [False, False]]), None]
+    frames = np.array([
+                       [[150, 200], [50, 80]],
+                       [[10, 20], [30, 40]],
+                      ])
+    # masks = [np.array([[False, False], [False, False]]), None]
+    masks = np.zeros((2, 2, 2), bool)
 
     output = ip.find_bright_area_estimates(frames, masks,
                                            brightness_threshold=170)

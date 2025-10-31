@@ -20,10 +20,11 @@ import imageio.v3 as iio
 import os
 import numpy as np
 import requests
-# from numba import njit, prange
 from concurrent.futures import ThreadPoolExecutor
-from joblib import Parallel, delayed
-from multiprocessing import Pool, cpu_count  # , shared_memory
+# from joblib import Parallel, delayed
+from multiprocessing import cpu_count, get_context
+import gc
+import psutil
 
 try:
     import matplotlib
@@ -61,124 +62,42 @@ def download_video_from_url(url, filename):
     return filename
 
 
-"""
-# (old version)
-def load_video_frames(filename, frames_start=None, frames_end=None, grayscale=True):
-    # loads in video frames as greyscale arrays with brightness values ranging
-    # from 0 to 255 can load in specific chunk of frames from given video
-    # (given frame start and end values as integers)
-    # requires video filename as string
-
-    cap = cv2.VideoCapture(filename)
-    frames = []
-
-    if frames_start:
-        cap.set(cv2.CAP_PROP_POS_FRAMES, frames_start)
-
-    frame_idx = frames_start or 0
-
-    while cap.isOpened():
-        if frames_end and frame_idx >= frames_end:
-            break
-
-        ret, frame = cap.read()
-        if not ret:
-            break
-
-        if grayscale and len(frame.shape) == 3:
-            frame = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
-        frames.append(frame)
-
-        frame_idx += 1
-
-    cap.release()
-    return frames
-"""
-
-
-"""
-def load_video_frames(filename, frames_start=None, frames_end=None, grayscale=True):
-    try:
-        # Read all frames at once (lazy streaming, not full memory load)
-        frames = iio.imread(filename, plugin="ffmpeg", format="gray" if grayscale else None)
-    except Exception as e:
-        raise IOError(f"Failed to read video '{filename}': {e}")
-
-    # Convert to NumPy array (uint8)
-    frames = np.asarray(frames, dtype=DTYPE_IMAGE)
-
-    total_frames = frames.shape[0]
-    start = frames_start or 0
-    end = frames_end or total_frames
-
-    # Slice requested frame range
-    frames = frames[start:end]
-
-    print(f"Loaded {len(frames)} frames from {filename} (shape: {frames.shape})")
-
-    return frames
-"""
-
-"""
-# CPU version (for unknown reasons ended up being slower)
-def load_video_frames(filename, frames_start=None, frames_end=None, grayscale=True):
-    cap = cv2.VideoCapture(filename)
-    if not cap.isOpened():
-        raise IOError(f"Cannot open video: {filename}")
-
-    total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
-    height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
-    width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
-
-    start = frames_start or 0
-    end = frames_end or total_frames
-    n_frames = max(0, end - start)
-
-    cap.set(cv2.CAP_PROP_POS_FRAMES, start)
-    frames = np.empty((n_frames, height, width), dtype=DTYPE_IMAGE)
-
-    i = 0
-    while i < n_frames:
-        ret, frame = cap.read()
-        if not ret or frame is None:
-            print(f"Warning: failed to read frame {i}")
-            break
-        if grayscale and len(frame.shape) == 3:
-            try:
-                frame = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
-            except Exception as e:
-                print(f"Frame {start + i} conversion failed: {e}")
-                continue
-        frames[i] = frame
-        i += 1
-
-    cap.release()
-
-    return frames[:i]
-"""
-
-
 def load_video_frames(filename, frames_start=None, frames_end=None, grayscale=True):
     """
     Streams video frames lazily using imageio.v3.imiter().
     Only the requested range is read into memory.
     """
     frames = []
+    reader = iio.imiter(filename)
 
-    for i, frame in enumerate(iio.imiter(filename)):
-        if frames_start is not None and i < frames_start:
-            continue
-        if frames_end is not None and i >= frames_end:
-            break
-        if grayscale and frame.ndim == 3:
-            frame = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
-        frames.append(frame)
+    try:
+        for i, frame in enumerate(reader):
+            if frames_start is not None and i < frames_start:
+                continue
+            if frames_end is not None and i >= frames_end:
+                break
+            if grayscale and frame.ndim == 3:
+                frame = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+            frames.append(frame)
+    except Exception as e:
+        print(f"[WARNING] Frame loading interrupted: {e}")
+    finally:
+        reader.close()
+
+        # Kill lingering FFmpeg child processes
+        current = psutil.Process()
+        for child in current.children(recursive=True):
+            if "ffmpeg" in child.name().lower():
+                try:
+                    child.kill()
+                except Exception:
+                    pass
 
     return np.asarray(frames, dtype=DTYPE_IMAGE)
 
 
 """
-# If the gpu version is installed:
+# If the gpu version of openCV is installed, the following will probably be faster:
 def load_video_frames(filename, frames_start=None, frames_end=None):
     reader = cv2.cudacodec.createVideoReader(filename)
     frames = []
@@ -274,14 +193,6 @@ def compute_background(frames, radius, pixel_std_coeff=1.0):
             rolling_sq_sum -= frames_sq[start - 1]
 
         # (Only neighbours are computed)
-        # (Original flawed logic commented below)
-        """
-            central_frame = frames[i]
-            central_frame_sq = frames_sq[i]
-        else:
-            central_frame = frames[radius]
-            central_frame_sq = frames_sq[radius]
-        """
         central_frame = frames[i]
         central_frame_sq = frames_sq[i]
         rolling_sum -= central_frame
@@ -307,7 +218,6 @@ def _raw_damaged_mask(frame, background):
     """
     returns first pass mask of potentially damaged pixels
     """
-    # *Seems a little reduntant returning threasholds if you're not going to use it*
     mask, _ = get_damaged_pixel_mask(frame, background)
 
     return mask.astype(bool)
@@ -331,42 +241,22 @@ def compute_persistent_mask(masks, consecutive_threshold):
     return longest_flag >= consecutive_threshold
 
 
-"""
-def filter_consecutive_pixels(masks, persistent):
-    filtered_masks = []
-    counts = []
-
-    for i, m in enumerate(masks):
-        if m is None:
-            filtered_masks.append(None)
-            counts.append(np.nan)
-        else:
-            filtered = m & ~persistent
-            filtered_masks.append(filtered)
-            counts.append(int(filtered.sum()))
-
-    return filtered_masks, counts
-"""
-
-
-def filter_consecutive_pixels(masks, persistent):
+def filter_consecutive_pixels(masks, persistent, return_counts=False):
     """
     filters out pixels which have been flagged as damaged for multiple
     consecutive frames
     """
-    filtered_masks = np.zeros_like(masks, dtype=DTYPE_MASK)
-    counts = np.full(len(masks), np.nan, dtype=DTYPE_COMPUTE)
+    filtered_masks = np.logical_and(masks, ~persistent)
 
-    inv_persistent = ~persistent
+    if return_counts:
+        counts = filtered_masks.sum(axis=(1, 2)).astype(DTYPE_COMPUTE)
 
-    for i, mask in enumerate(masks):
-        filtered = np.logical_and(mask, inv_persistent)
-        filtered_masks[i] = filtered
-        counts[i] = filtered.sum()
+        return filtered_masks, counts
 
-    return filtered_masks, counts
+    return filtered_masks
 
 
+"""
 # Going to have to monitor, as shows significant slow down for small tests
 def compute_cluster_stats(frames, masks, flows, settings, n_jobs=-1):
     def process_single(frame, mask, flow):
@@ -389,6 +279,36 @@ def compute_cluster_stats(frames, masks, flows, settings, n_jobs=-1):
 
     # returning cluster_count, cluster_size, cluster_brightness
     return np.array(results).T
+"""
+
+
+def compute_cluster_stats(frames, masks, flows, settings):
+    """
+    computes the number of clusters for each frame, as well as the mean
+    cluster size and brightness
+    """
+    n = len(frames)
+    cluster_count = np.zeros(n, float)
+    cluster_size = np.zeros(n, float)
+    cluster_brightness = np.zeros(n, float)
+
+    for i, (frame, mask) in enumerate(zip(frames, masks)):
+        if (not mask.any()) or (flows[i] > settings.flow_threshold):
+            continue
+        clean_uint8 = mask.astype(np.uint8)
+        _, count, avg_size, avg_brightness = filter_damaged_pixel_clusters(
+            frame,
+            clean_uint8,
+            settings.min_cluster_size,
+            settings.max_cluster_size,
+            settings.min_circularity,
+            settings.kernel,
+        )
+
+        cluster_count[i], cluster_size[i], cluster_brightness[i] = \
+            count, avg_size, avg_brightness
+
+    return cluster_count, cluster_size, cluster_brightness
 
 
 def _get_final_count(masks, bright_estimates):
@@ -406,19 +326,6 @@ def _get_final_count(masks, bright_estimates):
     ], dtype=DTYPE_COMPUTE)
 
     return counts
-
-
-"""
-# (old version)
-def _get_final_count(masks, bright_estimates):
-    counts = []
-
-    for mask, estimate in zip(masks, bright_estimates):
-        base = int(mask.sum())
-        counts.append(base + (estimate if not np.isnan(estimate) else 0))
-
-    return np.array(counts, dtype=DTYPE_COMPUTE)
-"""
 
 
 def _generate_plots(
@@ -504,7 +411,7 @@ def apply_static_suppression(masks, persistent, static_mask, calc_counts=False):
             counts[i] = m.sum()
         return final_masks, counts
     else:
-        return final_masks, None
+        return final_masks
 
 
 def detect_damaged_pixels(
@@ -534,7 +441,6 @@ def detect_damaged_pixels(
     optical_flows = compute_optical_flow_metric(frames)
 
     # find damaged pixel mask for each frame
-    # raw_masks = np.full(len(frames), None, dtype=object)
     raw_masks = np.zeros_like(frames, dtype=DTYPE_MASK)
 
     backgrounds = compute_background(
@@ -558,9 +464,8 @@ def detect_damaged_pixels(
         raw_masks,
         settings.consecutive_threshold
         )
-    # *Seems a waste to return counts*
-    clean_masks, _ = filter_consecutive_pixels(raw_masks,
-                                               persistent_pixels)
+
+    clean_masks = filter_consecutive_pixels(raw_masks, persistent_pixels)
 
     # initial heatmap calculation and static hotspot suppression
     static_mask = compute_static_mask(
@@ -571,7 +476,7 @@ def detect_damaged_pixels(
         10
     )
 
-    final_masks, total_counts = apply_static_suppression(
+    final_masks = apply_static_suppression(
         clean_masks,
         persistent_pixels,
         static_mask
@@ -627,13 +532,14 @@ def get_damaged_pixel_mask(frame, background):
 
 
 def filter_damaged_pixel_clusters(
-        frame,
-        damaged_pixel_mask,
-        min_cluster_size,
-        max_cluster_size,
-        min_circularity,
-        kernel,
-        circularity_size_threshold=10):
+                                  frame,
+                                  damaged_pixel_mask,
+                                  min_cluster_size,
+                                  max_cluster_size,
+                                  min_circularity,
+                                  kernel,
+                                  circularity_size_threshold=10,
+                                  ):
     """
     filters large groups of damaged pixels from the mask
     prevents bright noise such as reflections or glare being misidentified as
@@ -707,11 +613,11 @@ def filter_damaged_pixel_clusters(
 
 
 def remove_bright_regions(
-        background,
-        brightness_threshold,
-        filtered_damaged_pixels,
-        max_cluster_size
-        ):
+                          background,
+                          brightness_threshold,
+                          filtered_damaged_pixels,
+                          max_cluster_size
+                          ):
     """
     removes damaged pixels from the mask if they exist in bright areas
     avoids inaccuracies due to the code's capabilities of operating
@@ -746,49 +652,38 @@ def remove_bright_regions(
 
 
 def estimate_damaged_pixels_in_bright_areas(
-    frames,
-    damaged_pixel_masks,
-    brightness_threshold=170
-):
-
+                                            frames,
+                                            damaged_pixel_masks,
+                                            brightness_threshold=170,
+                                            ):
     """
-    estimates the number of damaged pixels present in bright areas or areas of
-        low contrast
-    provides estimates for the correct damaged pixel count where my code would
-        otherwise fail
+    Estimates the number of damaged pixels present in bright areas or areas of low contrast,
+    (where the code would otherwise fail to pick up damaged_pixels)
     """
 
-    num_frames = len(frames)
-    estimated_damaged_pixel_counts = np.full(num_frames, np.nan, dtype=DTYPE_COMPUTE)  # could just define as a np.empty
+    # identify low and high brightness regions, excluding existing
+    #   damaged pixels
+    frames = np.asarray(frames, dtype=DTYPE_COMPUTE)
+    damaged_pixel_masks = np.asarray(damaged_pixel_masks, dtype=DTYPE_MASK)
 
-    for i in range(len(frames)):
-        frame = frames[i]
-        mask = damaged_pixel_masks[i]
+    inv_damaged_pixel_masks = ~damaged_pixel_masks
+    low_brightness_masks = np.logical_and((frames < brightness_threshold), inv_damaged_pixel_masks)
+    low_brightness_areas = low_brightness_masks.sum(axis=(1, 2))
+    high_brightness_masks = np.logical_and((frames >= brightness_threshold), inv_damaged_pixel_masks)
+    high_brightness_areas = high_brightness_masks.sum(axis=(1, 2))
 
-        # identify low and high brightness regions, excluding existing
-        #   damaged pixels
-        low_brightness_mask = (frame < brightness_threshold) & ~mask
-        high_brightness_mask = (frame >= brightness_threshold) & ~mask
+    # density of damaged pixels in low-brightness areas
+    damaged_pixel_density = np.divide(
+                                      damaged_pixel_masks.sum(axis=(1, 2)),
+                                      low_brightness_areas,
+                                      out=np.full_like(low_brightness_areas, np.nan, dtype=DTYPE_COMPUTE),
+                                      where=low_brightness_areas != 0,
+                                      )
 
-        # calculate areas
-        low_brightness_area = np.sum(low_brightness_mask)  # low_brightness_mask.sum() exists
-        high_brightness_area = np.sum(high_brightness_mask)  # high_brightness_mask.sum() exists
+    # estimate damaged pixels in high-brightness areas
+    estimated_high_brightness_damaged_pixels = damaged_pixel_density * high_brightness_areas
 
-        if low_brightness_area > 0:
-            # density of damaged pixels in low-brightness areas
-            damaged_pixel_density = np.sum(mask) / low_brightness_area
-
-            # estimate damaged pixels in high-brightness areas
-            estimated_high_brightness_damaged_pixels = round(
-                damaged_pixel_density * high_brightness_area)
-
-        else:
-            estimated_high_brightness_damaged_pixels = np.nan
-
-        estimated_damaged_pixel_counts[i] = \
-            estimated_high_brightness_damaged_pixels
-
-    return estimated_damaged_pixel_counts  # is actually returning estimated_high_brightness_damaged_pixels
+    return estimated_high_brightness_damaged_pixels
 
 
 def find_bright_area_estimates(
@@ -1030,8 +925,31 @@ def plot_damaged_pixels(
             plt.close()
 
 
+# (changed since last fully run)
 def chunked_nanmean(array, step):
-    return [np.nanmean(array[i:i+step]) for i in range(0, len(array), step)]
+    """
+    Efficiently compute mean over consecutive chunks of an array.
+    Skips empty slices safely and avoids RuntimeWarnings.
+    """
+    if len(array) == 0:
+        return [np.nan]
+
+    # Trim to multiple of step
+    n_full = (len(array) // step) * step
+
+    # Compute means on all full chunks
+    reshaped = array[:n_full].reshape(-1, step)
+    means = np.nanmean(reshaped, axis=1)
+
+    # Could include left over stuff
+    """
+    remainder = len(array) % step
+    if remainder > 0:
+        last_chunk_mean = np.nanmean(array[-remainder:])
+        means = np.append(means, last_chunk_mean)
+    """
+
+    return means.tolist()
 
 
 def process_chunk(args):
@@ -1049,28 +967,6 @@ def process_chunk(args):
                                     )
 
     return results
-
-
-"""
-def process_chunk(args):
-    # Worker function for parallel processing of video chunks
-    shm_name, shape, dtype, start, end, plot, show_plots, save_plots, output_folder, params = args
-
-    shm = shared_memory.SharedMemory(name=shm_name)
-    chunk = np.ndarray(shape, dtype=dtype, buffer=shm.buf)[start:end]
-
-    results = detect_damaged_pixels(
-                                    chunk,
-                                    plot=plot,
-                                    show_plots=show_plots,
-                                    save_plots=save_plots,
-                                    output_folder=output_folder,
-                                    params=params,
-                                    )
-
-    shm.close()
-    return results
-"""
 
 
 def main(
@@ -1130,8 +1026,14 @@ def main(
     num_workers = min(len(chunk_args), cpu_count())
     print(f"Using {num_workers} worker processes")
 
-    with Pool(processes=num_workers) as pool:
-        results = pool.map(process_chunk, chunk_args)
+    ctx = get_context("spawn")
+    with ctx.Pool(processes=num_workers) as pool:
+        try:
+            results = pool.map(process_chunk, chunk_args)
+        finally:
+            pool.close()
+            pool.join()
+            gc.collect()
 
     # unpack & flatten results
     counts, clusters, sizes, brightness = zip(*results)

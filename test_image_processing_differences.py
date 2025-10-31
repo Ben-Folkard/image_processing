@@ -24,12 +24,12 @@ def sample_frames():
 
 
 def time_func(func, args, repeat=5):
-    times = []
-    for _ in range(repeat):
+    times = np.zeros(repeat, np.float64)
+    for i in range(repeat):
         start = time.perf_counter()
         func(*args)
-        times.append(time.perf_counter() - start)
-    return float(np.mean(times))
+        times[i] = time.perf_counter() - start
+    return times.mean()
 
 
 @pytest.mark.parametrize("func_name", [
@@ -83,7 +83,8 @@ def test_equivalence_and_benchmark(func_name, sample_frames, benchmark, tmp_path
             radius = 1
             args = (sample_frames, index, radius)
         case "apply_static_suppression":
-            masks = [np.array([[True, False], [True, True]]), None]
+            # masks = [np.array([[True, False], [True, True]]), None]
+            masks = [np.array([[True, False], [True, True]]), np.zeros((2, 2), bool)]
             persistent = np.array([[True, False], [False, False]])
             static_mask = np.array([[False, True], [False, False]])
 
@@ -94,7 +95,7 @@ def test_equivalence_and_benchmark(func_name, sample_frames, benchmark, tmp_path
             )
 
             final_masks_old, counts_old = func_old(*args)
-            final_masks_new, counts_new = func_new(*args)
+            final_masks_new, counts_new = func_new(*args, calc_counts=True)
 
             assert len(final_masks_old) == len(final_masks_new)
             for m_old, m_new in zip(final_masks_old, final_masks_new):
@@ -166,7 +167,7 @@ def test_equivalence_and_benchmark(func_name, sample_frames, benchmark, tmp_path
             cluster_count_old, cluster_size_old, cluster_brightness_old = func_old(*args)
 
             monkeypatch.setattr(ip_new, 'filter_damaged_pixel_clusters',
-                                lambda frame, mask, count, size, brightness:
+                                lambda frame, mask, min_cluster_size, max_cluster_size, min_circularity, kernel:
                                 (None, 42, 7, 123))
             cluster_count_new, cluster_size_new, cluster_brightness_new = func_new(*args)
 
@@ -176,13 +177,18 @@ def test_equivalence_and_benchmark(func_name, sample_frames, benchmark, tmp_path
 
             has_func_run = True
         case "_get_final_count":
-            masks = [np.array([[1, 1], [0, 1]], bool), None]
+            # masks = [np.array([[1, 1], [0, 1]], bool), None]
+            masks = [np.array([[1, 1], [0, 1]], bool), np.zeros((2, 2), bool)]
             estimates = [10, np.nan]
 
             args = (masks, estimates)
         case "find_bright_area_estimates":
-            frames = [np.array([[150, 200], [50, 80]]), np.array([[10, 20], [30, 40]])]
-            masks = [np.array([[False, False], [False, False]]), None]
+            frames = np.array([
+                               [[150, 200], [50, 80]],
+                               [[10, 20], [30, 40]]
+                              ])
+            # masks = [np.array([[False, False], [False, False]]), None]
+            masks = np.zeros((2, 2, 2), bool)
             brightness_threshold = 170
 
             args = (frames, masks, brightness_threshold)
@@ -203,7 +209,7 @@ def test_equivalence_and_benchmark(func_name, sample_frames, benchmark, tmp_path
             args = (frame, 2, 2, background)
 
             mask_uint8_old, thresholds_old = func_old(*args)
-            mask_uint8_new, thresholds_new = func_new(*args)
+            mask_uint8_new, thresholds_new = func_new(args[0], args[-1])
 
             assert np.array_equal(mask_uint8_old, mask_uint8_new)
             assert np.array_equal(thresholds_old, thresholds_new)
@@ -270,17 +276,18 @@ def test_equivalence_and_benchmark(func_name, sample_frames, benchmark, tmp_path
 
             args = (frames, plot)
         case "filter_consecutive_pixels":
-            masks = [
-                np.array([[True, False], [True, True]]),
-                np.array([[True, True], [False, True]])
-            ]
+            masks = np.array([
+                              [[True, False], [True, True]],
+                              [[True, True], [False, True]]
+                             ])
             persistent = np.array([[True, False], [False, True]])
             args = (masks, persistent)
             filtered_old, counts_old = func_old(*args)
-            filtered_new, counts_new = func_old(*args)
+            filtered_new, counts_new = func_new(*args, return_counts=True)
             assert np.array_equal(filtered_old, filtered_new)
             assert np.array_equal(counts_old, counts_new)
 
+            """
             masks = [None, np.array([[True]])]
             persistent = np.array([[False]])
             args = (masks, persistent)
@@ -292,6 +299,7 @@ def test_equivalence_and_benchmark(func_name, sample_frames, benchmark, tmp_path
                 else:
                     assert np.array_equal(old, new)
             assert np.allclose(counts_old, counts_new, equal_nan=True)
+            """
 
             has_func_run = True
         case "filter_damaged_pixel_clusters":
@@ -308,20 +316,21 @@ def test_equivalence_and_benchmark(func_name, sample_frames, benchmark, tmp_path
             damaged_mask[3, 3] = 1
             damaged_mask[2, 3] = 1
 
-            min_cluster_size = 2
-            max_cluster_size = 2
-            min_circularity = 0.0
+            settings = DummySettings()
+            settings.min_cluster_size = 2
+            settings.max_cluster_size = 2
+            settings.min_circularity = 0.0
 
-            args = (
+            args = [
                 frame,
                 damaged_mask,
-                min_cluster_size,
-                max_cluster_size,
-                min_circularity
-            )
+                settings.min_cluster_size,
+                settings.max_cluster_size,
+                settings.min_circularity
+            ]
 
             cleaned_mask_old, count_old, _, _ = func_old(*args)
-            cleaned_mask_new, count_new, _, _ = func_new(*args)
+            cleaned_mask_new, count_new, _, _ = func_new(*args, settings.kernel)
 
             assert np.array_equal(cleaned_mask_old, cleaned_mask_new)
             assert np.array_equal(count_old, count_new)
@@ -333,10 +342,14 @@ def test_equivalence_and_benchmark(func_name, sample_frames, benchmark, tmp_path
     if not has_func_run:
         result_old = func_old(*args)
         result_new = func_new(*args)
-        if func_name == "compute_background":
-            print(f"compute_background:\n{result_old = }\n{result_new = }")
+        # if func_name == "compute_background":
+        #     print(f"compute_background:\n{result_old = }\n{result_new = }")
         assert np.allclose(result_old, result_new, atol=1e-5, rtol=1e-4, equal_nan=True), f"{func_name} differs"
     t_old = time_func(func_old, args)
+    if func_name == "get_damaged_pixel_mask":
+        args = (args[0], args[-1])
+    elif func_name == "filter_damaged_pixel_clusters":
+        args.append(settings.kernel)
     t_new = time_func(func_new, args)
 
     speedup = t_old / t_new if t_new > 0 else np.nan
