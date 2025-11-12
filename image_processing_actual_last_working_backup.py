@@ -181,9 +181,11 @@ def _prepare_settings(params):
 
 
 def compute_background(frames, index, radius):
-    # estimate background brightness for each pixel of a given frame, based on
-    # the mean brightness of that pixel in the frames in a sliding window
-    # (providing the pixel is undamaged in those frames)
+    """
+    estimate background brightness for each pixel of a given frame, based on
+    the mean brightness of that pixel in the frames in a sliding window
+    (providing the pixel is undamaged in those frames)
+    """
     start = max(0, index - radius)
     end = min(len(frames), index + radius + 1)
 
@@ -652,7 +654,7 @@ def filter_damaged_pixel_clusters(
     damaged pixels
     """
 
-    # close gaps (test)  # Dilation followed by erosion to get rid of noise by bluring
+    # close gaps # Dilation followed by erosion to get rid of noise by bluring
     closed_mask = cv2.morphologyEx(
                                    damaged_pixel_mask.astype(np.uint8),
                                    cv2.MORPH_CLOSE,
@@ -670,7 +672,6 @@ def filter_damaged_pixel_clusters(
     if len(valid_labels) == 0:
         return cleaned_mask, 0, 0.0, float('nan')
 
-    perimeters = np.zeros(num_labels, np.float32)
     circularities = np.zeros(num_labels, np.float32)
 
     # Only compute contours for labels above threshold
@@ -682,20 +683,18 @@ def filter_damaged_pixel_clusters(
             mask_tmp[labels == label] = 255
             contours, _ = cv2.findContours(mask_tmp, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_NONE)
             if contours:
-                per = cv2.arcLength(contours[0], True)
-                if per > 0:
-                    perimeters[label] = per
-                    circularities[label] = 4 * np.pi * (stats[label, cv2.CC_STAT_AREA] / (per ** 2))
+                perimeter = cv2.arcLength(contours[0], True)
+                if perimeter > 0:
+                    circularities[label] = 4 * np.pi * (stats[label, cv2.CC_STAT_AREA] / (perimeter ** 2))
 
     kept_labels = []
     for label in valid_labels:
         if (
-            stats[label, cv2.CC_STAT_AREA] >= circularity_size_threshold
-            and circularities[label] < min_circularity
+            stats[label, cv2.CC_STAT_AREA] < circularity_size_threshold
+            or circularities[label] >= min_circularity
         ):
-            continue
-        kept_labels.append(label)
-        cleaned_mask[labels == label] = True
+            kept_labels.append(label)
+            cleaned_mask[labels == label] = True
 
     if not kept_labels:
         return cleaned_mask, 0, 0.0, float("nan")
@@ -712,8 +711,12 @@ def filter_damaged_pixel_clusters(
     brightness_sums = label_vals[used]
 
     cluster_count = len(kept_labels)
-    avg_cluster_size = float(np.mean(areas))
-    avg_cluster_brightness = float(np.sum(brightness_sums) / np.sum(areas))
+    if cluster_count > 0:
+        avg_cluster_size = float(np.mean(areas))
+        avg_cluster_brightness = float(np.sum(brightness_sums) / np.sum(areas))
+    else:
+        avg_cluster_size = 0.0
+        avg_cluster_brightness = float('nan')
 
     return cleaned_mask, cluster_count, avg_cluster_size, avg_cluster_brightness
 

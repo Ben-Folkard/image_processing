@@ -626,7 +626,7 @@ def filter_damaged_pixel_clusters(
     if len(valid_labels) == 0:
         return cleaned_mask, 0, 0.0, float('nan')
 
-    perimeters = np.zeros(num_labels, DTYPE_COMPUTE)
+    # perimeters = np.zeros(num_labels, DTYPE_COMPUTE)
     circularities = np.zeros(num_labels, DTYPE_COMPUTE)
 
     # Only compute contours for labels above threshold
@@ -640,7 +640,7 @@ def filter_damaged_pixel_clusters(
             if contours:
                 per = cv2.arcLength(contours[0], True)
                 if per > 0:
-                    perimeters[label] = per
+                    # perimeters[label] = per
                     circularities[label] = 4 * np.pi * (stats[label, cv2.CC_STAT_AREA] / (per ** 2))
 
     kept_labels = []
