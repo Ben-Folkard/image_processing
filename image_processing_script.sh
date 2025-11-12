@@ -1,8 +1,9 @@
 #!/bin/bash
 
 #SBATCH -p scarf
-#SBATCH -n 32
-#SBATCH -t 24:00:00
+#SBATCH --mem=64G
+#SBATCH -n 36
+#SBATCH -t 12:00:00
 #SBATCH -o results/%J.log
 #SBATCH -e results/%J.err
 
@@ -12,9 +13,11 @@ video_filename="11_01_H_170726081325.avi"
 average_time=1.0
 max_chunks=2
 step_size=1000
-plot="False"
+# plot="False"
 show_plots="False"
 save_plots="False"
+pre_processing_folder="results"
+# pre_processing_folder="../../../../scratch/scarf1493/"
 consecutive_threshold=2
 brightness_threshold=170
 flow_threshold=2.0
@@ -44,14 +47,16 @@ while [[ "$#" -gt 0 ]]; do
 		-mc) max_chunks="$2"; shift ;;
 		--step_size) step_size="$2"; shift ;;
 		-ss) step_size="$2"; shift ;;
-		--plot) plot="$2"; shift ;;
-		-p) plot="$2"; shift ;;
+		# --plot) plot="$2"; shift ;;
+		# -p) plot="$2"; shift ;;
 		--show_plots) show_plots="$2"; shift ;;
 		-shp) show_plots="$2"; shift ;;
 		--save_plots) save_plots="$2"; shift ;;
 		-svp) save_plots="$2"; shift ;;
 		--output_folder) output_folder="$2"; shift ;;
 		-of) output_folder="$2"; shift ;;
+		--pre_processing_folder) pre_processing_folder="$2"; shift ;;
+		-ppf) pre_processing_folder="$2"; shift ;;
 		--consecutive_threshold) consecutive_threshold="$2"; shift ;;
 		-ct) consecutive_threshold="$2"; shift ;;
 		--brightness_threshold) brightness_threshold="$2"; shift ;;
@@ -82,7 +87,7 @@ echo "    video_filename = ${video_filename}"
 echo "    average_time = ${average_time}"
 echo "    max_chunks = ${max_chunks}"
 echo "    step_size = ${step_size}"
-echo "    plot = ${plot}"
+# echo "    plot = ${plot}"
 echo "    show_plots = ${show_plots}"
 echo "    save_plots = ${save_plots}"
 echo "    output_folder = ${output_folder}"
@@ -96,8 +101,12 @@ echo "    min_circularity = ${min_circularity}"
 echo "    sliding_window_radius = ${sliding_window_radius}"
 echo "    number_of_plots = ${number_of_plots}"
 
-
-/home/vol03/scarf1493/myenv/bin/python3 "$filename" --video_filename "$video_filename" --average_time "$average_time" --max_chunks "$max_chunks" --step_size "$step_size" --plot "$plot" --show_plots "$show_plots" --save_plots "$save_plots" --output_folder "$output_folder" --consecutive_threshold "$consecutive_threshold" --brightness_threshold "$brightness_threshold" --flow_threshold "$flow_threshold" --static_threshold "$static_threshold" --min_cluster_size "$min_cluster_size" --max_cluster_size "$max_cluster_size" --min_circularity "$min_circularity" --sliding_window_radius "$sliding_window_radius" --number_of_plots "$number_of_plots"
+if [ $filename == "image_processing_pre_processed_video.py" ]; then
+    echo "    pre_processing_folder = ${pre_processing_folder}"
+    /home/vol03/scarf1493/myenv/bin/python3 "$filename" --video_filename "$video_filename" --average_time "$average_time" --max_chunks "$max_chunks" --step_size "$step_size" --show_plots "$show_plots" --save_plots "$save_plots" --output_folder "$output_folder" --consecutive_threshold "$consecutive_threshold" --brightness_threshold "$brightness_threshold" --flow_threshold "$flow_threshold" --static_threshold "$static_threshold" --min_cluster_size "$min_cluster_size" --max_cluster_size "$max_cluster_size" --min_circularity "$min_circularity" --sliding_window_radius "$sliding_window_radius" --number_of_plots "$number_of_plots" --pre_processing_folder  "$pre_processing_folder"
+else
+    /home/vol03/scarf1493/myenv/bin/python3 "$filename" --video_filename "$video_filename" --average_time "$average_time" --max_chunks "$max_chunks" --step_size "$step_size" --show_plots "$show_plots" --save_plots "$save_plots" --output_folder "$output_folder" --consecutive_threshold "$consecutive_threshold" --brightness_threshold "$brightness_threshold" --flow_threshold "$flow_threshold" --static_threshold "$static_threshold" --min_cluster_size "$min_cluster_size" --max_cluster_size "$max_cluster_size" --min_circularity "$min_circularity" --sliding_window_radius "$sliding_window_radius" --number_of_plots "$number_of_plots"
+fi
 
 if [ -n "$SLURM_JOB_ID" ]; then
 	mv "results/${SLURM_JOB_ID}.log" "$output_folder"

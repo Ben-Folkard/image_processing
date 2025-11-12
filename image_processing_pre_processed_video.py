@@ -22,9 +22,12 @@ import numpy as np
 import requests
 from concurrent.futures import ThreadPoolExecutor
 # from joblib import Parallel, delayed
-# from multiprocessing import cpu_count, get_context
-# import gc
+from multiprocessing import cpu_count, get_context
+import gc
+from shutil import rmtree
+import fnmatch
 # import psutil
+from types import SimpleNamespace
 
 try:
     import matplotlib
@@ -62,47 +65,40 @@ def download_video_from_url(url, filename):
     return filename
 
 
-"""
-loads in video frames as greyscale arrays with brightness values ranging
-from 0 to 255 can load in specific chunk of frames from given video
-(given frame start and end values as integers)
-requires video filename as string
-"""
-"""
-def load_video_frames(filename, frames_start=None, frames_end=None, grayscale=True):
-    cap = cv2.VideoCapture(filename)
-    if not cap.isOpened():
-        raise IOError(f"Cannot open video: {filename}")
+# Possibly come back and write better detection of .npy file logic
+def pre_process_video_frames(filename, step_size, num_frames, grayscale=True, output_folder="results"):
+    frame_output_folder = f"{output_folder}/{filename[:-4]}_frames"
+    os.makedirs(frame_output_folder, exist_ok=True)
+    if len(fnmatch.filter(os.listdir(frame_output_folder), '*.npy')) == 0:
+        start = 0
+        frames = []
+        for i, frame in enumerate(iio.imiter(filename)):
+            if grayscale and frame.ndim == 3:
+                frame = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+            frames.append(frame)
 
-    total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
-    height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
-    width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
-
-    start = frames_start or 0
-    end = frames_end or total_frames
-    n_frames = max(0, end - start)
-
-    cap.set(cv2.CAP_PROP_POS_FRAMES, start)
-    frames = np.empty((n_frames, height, width), dtype=np.uint8)
-
-    i = 0
-    while i < n_frames:
-        ret, frame = cap.read()
-        if not ret:
-            break
-        if grayscale and len(frame.shape) == 3:
-            frame = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
-        frames[i] = frame
-        i += 1
-
-    cap.release()
-
-    return frames[:i]
-"""
+            if ((i % step_size == 0) or (i == num_frames - 1)) and (i != 0):
+                np.save(f"{frame_output_folder}/{start} -> {i}", np.array(frames, dtype=DTYPE_IMAGE))
+                start = i
+                frames = [frame]
+    else:
+        print(f"[WARNING] .npy files found in {frame_output_folder}. Assuming that all the chunks are already pre-loaded")
 
 
-"""
-def load_video_frames(filename, frames_start=None, frames_end=None, grayscale=True):
+def load_video_frames(filename, frames_start, frames_end, output_folder="results"):
+    chunk_file = f"{output_folder}/{filename[:-4]}_frames/{frames_start} -> {frames_end}.npy"
+    if os.path.exists(chunk_file):
+        return np.load(f"{output_folder}/{filename[:-4]}_frames/{frames_start} -> {frames_end}.npy")
+    else:
+        print(f"[WARNING] {chunk_file} missing! Resorting to processing frame during main process")
+        return load_video_frames_during_processes(filename, frames_start=frames_start, frames_end=frames_end)
+
+
+def delete_pre_processed_video_frames(filename, output_folder):
+    rmtree(f"{output_folder}/{filename[:-4]}_frames")
+
+
+def load_video_frames_during_processes(filename, frames_start=None, frames_end=None, grayscale=True):
     cap = cv2.VideoCapture(filename)
     if not cap.isOpened():
         print(f"[ERROR] Could not open video file: {filename}")
@@ -138,7 +134,7 @@ def load_video_frames(filename, frames_start=None, frames_end=None, grayscale=Tr
         frames = [cv2.resize(f, (w, h)) for f in frames]
 
     return np.stack(frames).astype(DTYPE_IMAGE)
-"""
+
 
 """
 # If the gpu version of openCV is installed, the following will probably be faster:
@@ -153,25 +149,6 @@ def load_video_frames(filename, frames_start=None, frames_end=None):
         frames.append(gray.download())
     return np.stack(frames)
 """
-
-
-def load_video_frames(filename, frames_start=None, frames_end=None, grayscale=True):
-    """
-    Streams video frames lazily using imageio.v3.imiter().
-    Only the requested range is read into memory.
-    """
-    frames = []
-
-    for i, frame in enumerate(iio.imiter(filename)):
-        if frames_start is not None and i < frames_start:
-            continue
-        if frames_end is not None and i >= frames_end:
-            break
-        if grayscale and frame.ndim == 3:
-            frame = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
-        frames.append(frame)
-
-    return np.asarray(frames, dtype=DTYPE_IMAGE)
 
 
 def get_video_frames_from_url(
@@ -216,7 +193,8 @@ def _prepare_settings(params):
     }
     if params:
         defaults.update(params)
-    return type('S', (), defaults)
+    # return type('S', (), defaults)
+    return SimpleNamespace(**defaults)
 
 
 def compute_background(frames, radius, pixel_std_coeff=1.0):
@@ -483,7 +461,7 @@ def detect_damaged_pixels(
         plot=False,
         show_plots=False,
         save_plots=False,
-        output_folder="results",
+        output_folder="results"
         ):
     """
     main code for detecting damaged pixels
@@ -496,7 +474,6 @@ def detect_damaged_pixels(
     - aggregates statistics
     - optional plotting
     """
-
     frames = np.asarray(frames)
 
     # optical flow screening
@@ -989,6 +966,10 @@ def plot_damaged_pixels(
 
 # (changed since last fully run)
 def chunked_nanmean(array, step):
+    """
+    Efficiently compute mean over consecutive chunks of an array.
+    Skips empty slices safely and avoids RuntimeWarnings.
+    """
     if len(array) == 0:
         return [np.nan]
 
@@ -1010,25 +991,23 @@ def chunked_nanmean(array, step):
     return means.tolist()
 
 
-"""
 def process_chunk(args):
-    filename, start, end, plot, show_plots, save_plots, output_folder, params = args
+    filename, start, end, settings, plot, show_plots, save_plots, output_folder, pre_processing_folder = args
 
-    frames = load_video_frames(filename, frames_start=start, frames_end=end)
+    frames = load_video_frames(filename, start, end, output_folder=pre_processing_folder)
     if frames.size == 0:
         print(f"[WARNING] Skipping empty chunk ({start}-{end})")
         return (np.array([]), np.array([]), np.array([]), np.array([]))
 
     results = detect_damaged_pixels(
         frames,
+        settings,
         plot=plot,
         show_plots=show_plots,
         save_plots=save_plots,
         output_folder=output_folder,
-        params=params,
     )
     return results
-"""
 
 
 def main(
@@ -1040,6 +1019,7 @@ def main(
     show_plots: bool = False,
     save_plots: bool = False,
     output_folder: str = "results",
+    pre_processing_folder: str = "results",
     params: dict | None = None
 ):
     """
@@ -1073,17 +1053,19 @@ def main(
     if max_chunks is not None:
         monolith_frames_list = monolith_frames_list[:max_chunks+1]
 
-    """
+    pre_process_video_frames(video_filename, step_size, num_frames, output_folder=pre_processing_folder)
+
     chunk_args = [
         (
             video_filename,
             start,
             end,
+            settings,
             plot,
             show_plots,
             save_plots,
             output_folder,
-            params,
+            pre_processing_folder,
         )
         for start, end in zip(monolith_frames_list[:-1], monolith_frames_list[1:])
     ]
@@ -1109,44 +1091,6 @@ def main(
 
     # how many frames per averaging window
     step = int(round(FPS * average_time))
-    """
-
-    # storage for each chunk’s raw results
-    frames_count = []
-    all_clusters = []
-    all_sizes = []
-    all_brightness = []
-
-    # how many frames per averaging window
-    step = int(round(FPS * average_time))
-
-    # loop over video chunks and used damaged pixel detector
-    for idx in range(len(monolith_frames_list)-1):
-        start = monolith_frames_list[idx]
-        end = monolith_frames_list[idx + 1]
-        print(f"processing chunk {idx}: frames {start}–{end}")
-        chunk = load_video_frames(video_filename,
-                                  frames_start=start,
-                                  frames_end=end)
-        counts, clusters, sizes, brightness = detect_damaged_pixels(
-                                                                    chunk,
-                                                                    settings,
-                                                                    plot=plot,
-                                                                    show_plots=show_plots,
-                                                                    save_plots=save_plots,
-                                                                    output_folder=output_folder
-                                                                   )
-
-        frames_count.append(counts)
-        all_clusters.append(clusters)
-        all_sizes.append(sizes)
-        all_brightness.append(brightness)
-
-    # flatten results
-    counts = np.concatenate(frames_count)
-    clusters = np.concatenate(all_clusters)
-    sizes = np.concatenate(all_sizes)
-    brightness = np.concatenate(all_brightness)
 
     averages_counts = chunked_nanmean(counts, step)
 
@@ -1180,6 +1124,7 @@ if __name__ == "__main__":
     parser.add_argument("-shp", "--show_plots", help="True or False, determines whether the program visually shows plots")
     parser.add_argument("-svp", "--save_plots", help="True or False, determines whether the program saves plots")
     parser.add_argument("-of", "--output_folder", help="Location of where saved plots are saved")
+    parser.add_argument("-ppf", "--pre_processing_folder", help="The directory where the pre-processed frames are looked for")
     parser.add_argument("-ct", "--consecutive_threshold")
     parser.add_argument("-bt", "--brightness_threshold")
     parser.add_argument("-ft", "--flow_threshold")
@@ -1191,7 +1136,7 @@ if __name__ == "__main__":
     parser.add_argument("-np", "--number_of_plots")
     args = parser.parse_args()
 
-    VIDEO_FILENAME = args.video_filename if args.video_filename else "11_01_H_170726081325.avi"
+    video_filename = args.video_filename if args.video_filename else "11_01_H_170726081325.avi"
     average_time = float(args.average_time) if args.average_time else 1.0
     if args.max_chunks:
         if args.max_chunks.lower() == "none":
@@ -1205,6 +1150,7 @@ if __name__ == "__main__":
     show_plots = (args.show_plots.lower() == "true") if args.show_plots else plot
     save_plots = (args.save_plots.lower() == "true") if args.save_plots else False
     output_folder = args.output_folder if args.output_folder else "results"
+    pre_processing_folder = args.pre_processing_folder if args.output_folder else "results"
 
     params = {
         'consecutive_threshold': int(args.consecutive_threshold) if args.consecutive_threshold else 2,
@@ -1220,7 +1166,7 @@ if __name__ == "__main__":
 
     # for a quick test on only 2 chunks:
     results = main(
-                   VIDEO_FILENAME,
+                   video_filename,
                    average_time=average_time,
                    max_chunks=max_chunks,
                    step_size=step_size,
@@ -1228,6 +1174,7 @@ if __name__ == "__main__":
                    show_plots=show_plots,
                    save_plots=save_plots,
                    output_folder=output_folder,
+                   pre_processing_folder=pre_processing_folder,
                    params=params,
     )
 
@@ -1236,138 +1183,3 @@ if __name__ == "__main__":
     print("sizes:", results["averages_size"])
     print("brightness:", results["averages_brightness"])
     print("times:", results["times"])
-
-"""
-# (old version)
-def load_video_frames(filename, frames_start=None, frames_end=None, grayscale=True):
-    # loads in video frames as greyscale arrays with brightness values ranging
-    # from 0 to 255 can load in specific chunk of frames from given video
-    # (given frame start and end values as integers)
-    # requires video filename as string
-
-    cap = cv2.VideoCapture(filename)
-    frames = []
-
-    if frames_start:
-        cap.set(cv2.CAP_PROP_POS_FRAMES, frames_start)
-
-    frame_idx = frames_start or 0
-
-    while cap.isOpened():
-        if frames_end and frame_idx >= frames_end:
-            break
-
-        ret, frame = cap.read()
-        if not ret:
-            break
-
-        if grayscale and len(frame.shape) == 3:
-            frame = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
-        frames.append(frame)
-
-        frame_idx += 1
-
-    cap.release()
-    return frames
-"""
-
-
-"""
-def load_video_frames(filename, frames_start=None, frames_end=None, grayscale=True):
-    try:
-        # Read all frames at once (lazy streaming, not full memory load)
-        frames = iio.imread(filename, plugin="ffmpeg", format="gray" if grayscale else None)
-    except Exception as e:
-        raise IOError(f"Failed to read video '{filename}': {e}")
-
-    # Convert to NumPy array (uint8)
-    frames = np.asarray(frames, dtype=DTYPE_IMAGE)
-
-    total_frames = frames.shape[0]
-    start = frames_start or 0
-    end = frames_end or total_frames
-
-    # Slice requested frame range
-    frames = frames[start:end]
-
-    print(f"Loaded {len(frames)} frames from {filename} (shape: {frames.shape})")
-
-    return frames
-"""
-
-"""
-# CPU version (for unknown reasons ended up being slower)
-def load_video_frames(filename, frames_start=None, frames_end=None, grayscale=True):
-    cap = cv2.VideoCapture(filename)
-    if not cap.isOpened():
-        raise IOError(f"Cannot open video: {filename}")
-
-    total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
-    height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
-    width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
-
-    start = frames_start or 0
-    end = frames_end or total_frames
-    n_frames = max(0, end - start)
-
-    cap.set(cv2.CAP_PROP_POS_FRAMES, start)
-    frames = np.empty((n_frames, height, width), dtype=DTYPE_IMAGE)
-
-    i = 0
-    while i < n_frames:
-        ret, frame = cap.read()
-        if not ret or frame is None:
-            print(f"Warning: failed to read frame {i}")
-            break
-        if grayscale and len(frame.shape) == 3:
-            try:
-                frame = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
-            except Exception as e:
-                print(f"Frame {start + i} conversion failed: {e}")
-                continue
-        frames[i] = frame
-        i += 1
-
-    cap.release()
-
-    return frames[:i]
-"""
-
-"""
-def load_video_frames(filename, frames_start=None, frames_end=None, grayscale=True):
-    frames = []
-    reader = iio.imiter(filename)
-
-    for i, frame in enumerate(iio.imiter(filename)):
-        if frames_start is not None and i < frames_start:
-            continue
-        if frames_end is not None and i >= frames_end:
-            break
-        if grayscale and frame.ndim == 3:
-            frame = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
-        frames.append(frame)
-    try:
-        for i, frame in enumerate(reader):
-            if frames_start is not None and i < frames_start:
-                continue
-            if frames_end is not None and i >= frames_end:
-                break
-            if grayscale and frame.ndim == 3:
-                frame = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
-            frames.append(frame)
-    except Exception as e:
-        print(f"[WARNING] Frame loading interrupted: {e}")
-    finally:
-        reader.close()
-
-        # Kill lingering FFmpeg child processes
-        current = psutil.Process()
-        for child in current.children(recursive=True):
-            if "ffmpeg" in child.name().lower():
-                try:
-                    child.kill()
-                except Exception:
-                    pass
-
-    return np.asarray(frames, dtype=DTYPE_IMAGE)
-"""
