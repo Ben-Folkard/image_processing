@@ -1248,14 +1248,12 @@ def main(
 
 
 if __name__ == "__main__":
-    print("Parsing arguments...")
     import argparse
     parser = argparse.ArgumentParser()
     parser.add_argument("-vf", "--video_filename", help="Path to the AVI file")
     parser.add_argument("-at", "--average_time", help="How many seconds to average over in the final summaries")
     parser.add_argument("-mc", "--max_chunks", help="If not None, only process that many chunks (for quick tests)")
     parser.add_argument("-ss", "--step_size", help="The number of steps each chunk is split into")
-    # parser.add_argument("-p", "--plot", help="True or False, determines whether the program plots")
     parser.add_argument("-shp", "--show_plots",
                         help="Default=False) True or False, determines whether the program visually shows plots")
     parser.add_argument("-svp", "--save_plots", help="Default=False) or False, determines whether the program saves plots")
@@ -1317,9 +1315,6 @@ if __name__ == "__main__":
         'number_of_plots': int(args.number_of_plots) if args.number_of_plots else 20,
     }
 
-    print("Arguments loaded")
-    print("Starting calculations...")
-    # for a quick test on only 2 chunks:
     results = main(
         VIDEO_FILENAME,
         average_time=average_time,
