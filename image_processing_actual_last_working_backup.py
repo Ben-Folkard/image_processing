@@ -380,6 +380,7 @@ def _get_final_count(masks, bright_estimates):
 
 def _generate_plots(
         frames,
+        chunk_index,
         masks,
         counts,
         flows,
@@ -401,6 +402,7 @@ def _generate_plots(
             visualise_damaged_pixels(
                                      frames[i],
                                      i,
+                                     chunk_index,
                                      masks[i],
                                      counts[i],
                                      show_plots=show_plots,
@@ -411,6 +413,7 @@ def _generate_plots(
     if plot_damaged_pixels_plot:
         plot_damaged_pixels(
                             counts,
+                            chunk_index,
                             show_plots=show_plots,
                             save_plots=save_plots,
                             output_folder=output_folder,
@@ -425,6 +428,7 @@ def _generate_plots(
         )
         plot_heatmap(
                      heatmap,
+                     chunk_index,
                      show_plots=show_plots,
                      save_plots=save_plots,
                      output_folder=output_folder,
@@ -521,6 +525,7 @@ def apply_static_suppression(masks, persistent, static_mask):
 
 def detect_damaged_pixels(
     frames,
+    chunk_index,
     plot=False,
     show_plots=False,
     save_plots=False,
@@ -611,12 +616,14 @@ def detect_damaged_pixels(
     if plot:
         _generate_plots(
             frames,
+            chunk_index,
             final_masks,
             total_counts,
             optical_flows,
             settings,
             show_plots=show_plots,
             save_plots=save_plots,
+            output_folder=output_folder,
             visualise_damaged_pixels_plot=visualise_damaged_pixels_plot,
             plot_damaged_pixels_plot=plot_damaged_pixels_plot,
             plot_heatmap_plot=plot_heatmap_plot
@@ -929,6 +936,7 @@ def find_damaged_pixel_heatmap(
 def visualise_damaged_pixels(
         frame,
         frame_index,
+        chunk_index,
         cluster_mask,
         cluster_count,
         bright_threshold=170,
@@ -966,7 +974,7 @@ def visualise_damaged_pixels(
         plt.figure(figsize=(14, 6))
         plt.subplot(1, 2, 1)
         plt.imshow(frame, cmap='gray', vmin=0, vmax=255)
-        plt.title(f"original frame {frame_index}")
+        plt.title(f"original chunk {chunk_index}, frame {frame_index}")
         plt.axis('off')
 
         plt.subplot(1, 2, 2)
@@ -988,7 +996,7 @@ def visualise_damaged_pixels(
 
         if save_plots:
             plt.tight_layout()
-            filename = os.path.join(output_folder, f"visualise_damaged_pixels_frame_{frame_index}.png")
+            filename = os.path.join(output_folder, f"visualise_damaged_pixels_frame_{chunk_index=}_{frame_index=}.png")
             plt.savefig(filename, dpi=300)
 
         plt.close()
@@ -996,6 +1004,7 @@ def visualise_damaged_pixels(
 
 def plot_heatmap(
                  heatmap,
+                 chunk_index,
                  title="Damaged Pixel Heatmap",
                  show_plots=True,
                  save_plots=False,
@@ -1012,12 +1021,12 @@ def plot_heatmap(
         plt.figure(figsize=figsize)
         plt.imshow(heatmap, cmap='viridis', interpolation='nearest')
         plt.colorbar(label="Percentage of frames (%)")
-        plt.title(title)
+        plt.title(f"{title} ({chunk_index = })")
         if show_plots:
             plt.show()
         if save_plots:
             plt.tight_layout()
-            filename = os.path.join(output_folder, f"{title.lower().replace(' ', '_')}.png")
+            filename = os.path.join(output_folder, f"{title.lower().replace(' ', '_')}_{chunk_index=}.png")
             plt.savefig(filename, dpi=300)
 
         plt.close()
@@ -1025,6 +1034,7 @@ def plot_heatmap(
 
 def plot_damaged_pixels(
                         damaged_pixel_counts,
+                        chunk_index,
                         show_plots=True,
                         save_plots=False,
                         output_folder="results",
@@ -1041,7 +1051,7 @@ def plot_damaged_pixels(
                  color='blue')
         plt.xlabel('Frame Number')
         plt.ylabel('Number of Damaged Pixels')
-        plt.title('Damaged Pixels Detected Over Time')
+        plt.title(f'Damaged Pixels Detected Over Time ({chunk_index = })')
         plt.legend()
 
         if show_plots:
@@ -1049,7 +1059,7 @@ def plot_damaged_pixels(
 
         if save_plots:
             plt.tight_layout()
-            filename = os.path.join(output_folder, "plot_damged_pixels.png")
+            filename = os.path.join(output_folder, f"plot_damged_pixels_{chunk_index=}.png")
             plt.savefig(filename, dpi=300)
 
         plt.close()
@@ -1073,6 +1083,54 @@ def chunked_nanmean(array, step):
         means = np.append(means, last_chunk_mean)
 
     return means.tolist()
+
+
+"""
+def display_variables(**kwargs):
+    print("Python passed in variables:")
+    for name, val in kwargs.items():
+        print(f"{name} = {val}")
+"""
+
+
+def plot_all_chunks(
+    all_counts,
+    all_clusters,
+    all_sizes,
+    all_brightness,
+    times,
+    show_plots=True,
+    save_plots=False,
+    output_folder="results"
+):
+    fig, axes = plt.subplots(4, 1, figsize=(12, 10), sharex=True)
+    axes[0].plot(all_counts, color='blue', label="Damaged Pixel Count")
+    axes[1].plot(all_clusters, color='orange', label="Cluster Count")
+    axes[2].plot(all_sizes, color='green', label="Average Cluster Size")
+    axes[3].plot(all_brightness, color='red', label="Average Brightness")
+
+    for ax in axes:
+        ax.legend(loc='upper right')
+        ax.grid(True, linestyle='--', alpha=0.5)
+
+    axes[0].set_title("Combined Chunk Results Over Frames")
+    axes[-1].set_xlabel("Frame Index" if times is None else "Time (s)")
+
+    if times is not None:
+        for ax in axes:
+            ax.set_xlim([0, len(times)])
+
+    plt.tight_layout()
+
+    if save_plots:
+        os.makedirs(output_folder, exist_ok=True)
+        filename = os.path.join(output_folder, "combined_chunks_overview.png")
+        plt.savefig(filename, dpi=300)
+
+    if show_plots:
+        plt.show()
+
+    plt.close()
 
 
 def main(
@@ -1103,6 +1161,21 @@ def main(
     - save_plots: True or False, determines whether the program saves plots
     - output_folder: Location of where saved plots are saved
     """
+    """
+    # Done as a test to see if all the variables are being parsed properly
+    display_variables(
+        video_filename=video_filename,
+        average_time=average_time,
+        max_chunks=max_chunks,
+        step_size=step_size,
+        plot=plot,
+        show_plots=show_plots,
+        save_plots=save_plots,
+        output_folder=output_folder,
+        params=params
+    )
+    """
+
     # open video
     cap = cv2.VideoCapture(video_filename)
     num_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
@@ -1137,6 +1210,7 @@ def main(
                                   frames_end=end)
         counts, clusters, sizes, brightness = detect_damaged_pixels(
             chunk,
+            idx,
             plot=plot,
             show_plots=show_plots,
             save_plots=save_plots,
@@ -1174,6 +1248,7 @@ def main(
 
 
 if __name__ == "__main__":
+    print("Parsing arguments...")
     import argparse
     parser = argparse.ArgumentParser()
     parser.add_argument("-vf", "--video_filename", help="Path to the AVI file")
@@ -1181,8 +1256,22 @@ if __name__ == "__main__":
     parser.add_argument("-mc", "--max_chunks", help="If not None, only process that many chunks (for quick tests)")
     parser.add_argument("-ss", "--step_size", help="The number of steps each chunk is split into")
     # parser.add_argument("-p", "--plot", help="True or False, determines whether the program plots")
-    parser.add_argument("-shp", "--show_plots", help="True or False, determines whether the program visually shows plots")
-    parser.add_argument("-svp", "--save_plots", help="True or False, determines whether the program saves plots")
+    parser.add_argument("-shp", "--show_plots",
+                        help="Default=False) True or False, determines whether the program visually shows plots")
+    parser.add_argument("-svp", "--save_plots", help="Default=False) or False, determines whether the program saves plots")
+    parser.add_argument("-vdpp", "--visualise_damaged_pixels_plot",
+                        help="Default=False), True or False, " +
+                        "whether to produce number_of_plots visualise_damaged_pixels plot for every chunk")
+    parser.add_argument("-pdpp", "--plot_damaged_pixels_plot",
+                        help="Default=True), True or False, " +
+                        "whether to produce number_of_plots visualise_damaged_pixels plot for every chunk")
+    parser.add_argument("-php", "--plot_heatmap_plot",
+                        help="Default=True), True or False, " +
+                        "whether to produce number_of_plots visualise_damaged_pixels plot for every chunk")
+    parser.add_argument("-cp", "--chunk_plots",
+                        help="Default=True) True or False, determines whether chunk plots are produced or not")
+    parser.add_argument("-ap", "--average_plots",
+                        help="Default=True) True or False, determines whether the final averages plots are produced or not")
     parser.add_argument("-of", "--output_folder", help="Location of where saved plots are saved")
     parser.add_argument("-ct", "--consecutive_threshold")
     parser.add_argument("-bt", "--brightness_threshold")
@@ -1207,7 +1296,13 @@ if __name__ == "__main__":
     step_size = int(args.step_size) if args.step_size else 1000
     show_plots = (args.show_plots.lower() == "true") if args.show_plots else False
     save_plots = (args.save_plots.lower() == "true") if args.save_plots else False
-    plot = show_plots or save_plots
+    chunk_plots = (args.chunk_plots.lower() == "true") if args.chunk_plots else True
+    average_plots = (args.average_plots.lower() == "true") if args.average_plots else True
+    plot = (show_plots or save_plots) and chunk_plots
+    visualise_damaged_pixels_plot = ((args.visualise_damaged_pixels_plot.lower() == "true")
+                                     if args.visualise_damaged_pixels_plot else False)
+    plot_damaged_pixels_plot = (args.plot_damaged_pixels_plot.lower() == "true") if args.plot_damaged_pixels_plot else True
+    plot_heatmap_plot = (args.plot_heatmap_plot.lower() == "true") if args.plot_heatmap_plot else True
     output_folder = args.output_folder if args.output_folder else "results"
 
     params = {
@@ -1222,6 +1317,8 @@ if __name__ == "__main__":
         'number_of_plots': int(args.number_of_plots) if args.number_of_plots else 20,
     }
 
+    print("Arguments loaded")
+    print("Starting calculations...")
     # for a quick test on only 2 chunks:
     results = main(
         VIDEO_FILENAME,
@@ -1232,14 +1329,27 @@ if __name__ == "__main__":
         show_plots=show_plots,
         save_plots=save_plots,
         output_folder=output_folder,
-        visualise_damaged_pixels_plot=False,
-        plot_damaged_pixels_plot=True,
-        plot_heatmap_plot=True,
+        visualise_damaged_pixels_plot=visualise_damaged_pixels_plot,
+        plot_damaged_pixels_plot=plot_damaged_pixels_plot,
+        plot_heatmap_plot=plot_heatmap_plot,
         params=params,
     )
 
-    print("counts:", results["averages_counts"])
-    print("clusters:", results["averages_clusters"])
-    print("sizes:", results["averages_size"])
-    print("brightness:", results["averages_brightness"])
-    print("times:", results["times"])
+    if average_plots:
+        plot_all_chunks(
+            results["averages_counts"],
+            results["averages_clusters"],
+            results["averages_size"],
+            results["averages_brightness"],
+            results["times"],
+            show_plots=show_plots,
+            save_plots=save_plots,
+            output_folder=output_folder
+        )
+    else:
+        print("counts:", results["averages_counts"])
+        print("clusters:", results["averages_clusters"])
+        print("sizes:", results["averages_size"])
+        print("brightness:", results["averages_brightness"])
+        print("times:", results["times"])
+    print("\nDone")
